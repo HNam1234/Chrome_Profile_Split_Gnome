@@ -17,7 +17,10 @@ APP_DIR = HOME / ".local/share/applications"
 BIN_DIR = HOME / ".local/bin"
 ICON_DIR = HOME / ".local/share/icons/hicolor/256x256/apps"
 EXT_DIR = HOME / ".local/share/gnome-shell/extensions/dock-window-preview@quivio"
+AUTOSTART_DIR = HOME / ".config/autostart"
 CHROME_CONFIG = HOME / ".config/google-chrome"
+CLIPBOARD_SHORTCUT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
+COPYQ_AUTOSTART = AUTOSTART_DIR / "copyq.desktop"
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -528,6 +531,16 @@ def run(command, check=True):
     return completed.stdout.strip()
 
 
+def parse_gsettings_list(raw):
+    if not raw.startswith("["):
+        return []
+    return [part.strip().strip("'") for part in raw.strip("[]").split(",") if part.strip()]
+
+
+def format_gsettings_list(items):
+    return "[" + ", ".join(f"'{item}'" for item in items) + "]"
+
+
 def sanitize_id(value):
     return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-") or "profile"
 
@@ -566,6 +579,7 @@ class App(Gtk.ApplicationWindow):
         self.set_border_width(0)
         self.profiles = []
         self.syncing_style = False
+        self.syncing_features = False
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
@@ -609,13 +623,35 @@ class App(Gtk.ApplicationWindow):
         self.compatibility_label.set_line_wrap(True)
         self.compatibility_card.pack_start(self.compatibility_label, False, False, 0)
 
-        setup_card = self.create_card("Setup")
+        feature_card = self.create_card("Features")
+        content.pack_start(feature_card, False, False, 0)
+
+        self.profile_switch = self.create_feature_switch(
+            feature_card,
+            "Chrome Profile Dock Icons",
+            "Create, pin, and maintain one Ubuntu Dock icon per Chrome profile.",
+            self.on_profile_feature_toggled,
+        )
+        self.hover_switch = self.create_feature_switch(
+            feature_card,
+            "Hover Window Previews",
+            "Install and enable the local GNOME dock hover-preview extension.",
+            self.on_hover_feature_toggled,
+        )
+        self.clipboard_switch = self.create_feature_switch(
+            feature_card,
+            "Clipboard History (CopyQ)",
+            "Use CopyQ for a smooth community-tested Super+V clipboard history popup.",
+            self.on_clipboard_feature_toggled,
+        )
+
+        setup_card = self.create_card("Manual Actions")
         content.pack_start(setup_card, False, False, 0)
 
         setup_grid = Gtk.Grid(column_spacing=12, row_spacing=12)
         setup_card.pack_start(setup_grid, False, False, 0)
 
-        install_button = self.create_primary_button("Install Profile Icons", "Create or update one launcher per Chrome profile.")
+        install_button = self.create_primary_button("Update Profile Icons", "Regenerate profile launchers without changing feature switches.")
         install_button.connect("clicked", self.on_install_profiles)
         setup_grid.attach(install_button, 0, 0, 1, 1)
 
@@ -680,6 +716,7 @@ class App(Gtk.ApplicationWindow):
         self.refresh_compatibility()
         self.refresh_current_style()
         self.refresh_profiles()
+        self.refresh_feature_state()
 
     def create_card(self, title):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -696,6 +733,30 @@ class App(Gtk.ApplicationWindow):
         button.set_tooltip_text(tooltip)
         button.set_hexpand(True)
         return button
+
+    def create_feature_switch(self, parent, title, detail, callback):
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.set_margin_top(2)
+        row.set_margin_bottom(2)
+
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        label = Gtk.Label()
+        label.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>")
+        label.set_xalign(0)
+        description = Gtk.Label(label=detail)
+        description.set_xalign(0)
+        description.set_line_wrap(True)
+        copy.pack_start(label, False, False, 0)
+        copy.pack_start(description, False, False, 0)
+
+        switch = Gtk.Switch()
+        switch.set_valign(Gtk.Align.CENTER)
+        switch.connect("state-set", callback)
+
+        row.pack_start(copy, True, True, 0)
+        row.pack_end(switch, False, False, 0)
+        parent.pack_start(row, False, False, 0)
+        return switch
 
     def log(self, message):
         self.status_label.set_text(message)
@@ -714,11 +775,13 @@ class App(Gtk.ApplicationWindow):
         )
         xdotool_available = shutil.which("xdotool") is not None
         config_dir, browser_id = detect_chrome_config()
+        copyq_available = shutil.which("copyq") is not None
 
         lines = [
             f"Desktop session: {session}",
             f"Shell: {shell}",
             f"Browser config: {config_dir if config_dir.exists() else 'not found yet'}",
+            f"CopyQ: {'installed' if copyq_available else 'not installed'}",
         ]
 
         if session == "x11" and xdotool_available:
@@ -733,6 +796,13 @@ class App(Gtk.ApplicationWindow):
 
         self.compatibility_label.set_text(f"{support}\n\n" + "\n".join(lines))
         return browser_id
+
+    def refresh_feature_state(self):
+        self.syncing_features = True
+        self.profile_switch.set_active(self.profile_feature_enabled())
+        self.hover_switch.set_active(self.hover_feature_enabled())
+        self.clipboard_switch.set_active(self.clipboard_feature_enabled())
+        self.syncing_features = False
 
     def refresh_current_style(self):
         current = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False)
@@ -817,26 +887,21 @@ class App(Gtk.ApplicationWindow):
         self.refresh_compatibility()
         self.refresh_current_style()
         self.refresh_profiles()
+        self.refresh_feature_state()
 
     def on_install_profiles(self, _button):
         try:
             self.install_profile_launchers()
             self.log("Profile dock icons installed. Close Chrome and reopen profiles from the dock icons.")
+            self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed: {error}")
 
     def on_pin_profiles(self, _button):
         try:
-            desktop_ids = [self.desktop_id_for_profile(profile) for profile in self.profiles]
-            current_raw = run(["gsettings", "get", "org.gnome.shell", "favorite-apps"], check=False)
-            current = []
-            if current_raw.startswith("["):
-                current = [part.strip().strip("'") for part in current_raw.strip("[]").split(",") if part.strip()]
-            filtered = [item for item in current if item not in desktop_ids and item != "google-chrome.desktop" and item != "chromium.desktop"]
-            new_favorites = desktop_ids + filtered
-            value = "[" + ", ".join(f"'{item}'" for item in new_favorites) + "]"
-            run(["gsettings", "set", "org.gnome.shell", "favorite-apps", value])
+            self.pin_profile_launchers()
             self.log("Pinned profile icons to the dock.")
+            self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed to pin icons: {error}")
 
@@ -845,8 +910,59 @@ class App(Gtk.ApplicationWindow):
             self.install_hover_extension()
             self.log("Hover preview extension installed and enabled.")
             self.log("Restart GNOME Shell to load it: Alt+F2, type r, press Enter. On Wayland, log out/in.")
+            self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed to install hover previews: {error}")
+
+    def on_profile_feature_toggled(self, _switch, state):
+        if self.syncing_features:
+            return False
+        try:
+            if state:
+                self.install_profile_launchers()
+                self.pin_profile_launchers()
+                self.log("Chrome profile dock icons enabled.")
+            else:
+                self.disable_profile_launchers()
+                self.log("Chrome profile dock icons disabled.")
+            self.refresh_feature_state()
+        except Exception as error:
+            self.log(f"Failed to update profile dock icons: {error}")
+            self.refresh_feature_state()
+        return True
+
+    def on_hover_feature_toggled(self, _switch, state):
+        if self.syncing_features:
+            return False
+        try:
+            if state:
+                self.install_hover_extension()
+                self.log("Hover previews enabled. Restart GNOME Shell or log out/in to load them.")
+            else:
+                self.disable_hover_extension()
+                self.log("Hover previews disabled. Restart GNOME Shell or log out/in to unload them.")
+            self.refresh_feature_state()
+        except Exception as error:
+            self.log(f"Failed to update hover previews: {error}")
+            self.refresh_feature_state()
+        return True
+
+    def on_clipboard_feature_toggled(self, _switch, state):
+        if self.syncing_features:
+            return False
+        try:
+            if state:
+                self.enable_copyq_clipboard()
+                self.log("Clipboard history enabled with CopyQ. Use Super+V.")
+            else:
+                self.disable_copyq_clipboard()
+                self.log("Clipboard history disabled.")
+            self.refresh_compatibility()
+            self.refresh_feature_state()
+        except Exception as error:
+            self.log(f"Failed to update clipboard history: {error}")
+            self.refresh_feature_state()
+        return True
 
     def on_style_toggled(self, button, action):
         if self.syncing_style:
@@ -918,6 +1034,43 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
 
         run(["update-desktop-database", str(APP_DIR)], check=False)
 
+    def pin_profile_launchers(self):
+        if not self.profiles:
+            self.refresh_profiles()
+        desktop_ids = [self.desktop_id_for_profile(profile) for profile in self.profiles]
+        current = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "favorite-apps"], check=False))
+        filtered = [
+            item
+            for item in current
+            if item not in desktop_ids
+            and item != "google-chrome.desktop"
+            and item != "chromium.desktop"
+            and not item.startswith("google-chrome-profile-profile-")
+        ]
+        run(["gsettings", "set", "org.gnome.shell", "favorite-apps", format_gsettings_list(desktop_ids + filtered)])
+
+    def disable_profile_launchers(self):
+        desktop_ids = [self.desktop_id_for_profile(profile) for profile in self.profiles]
+        current = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "favorite-apps"], check=False))
+        filtered = [item for item in current if item not in desktop_ids and not item.startswith("google-chrome-profile-")]
+        if "google-chrome.desktop" not in filtered and shutil.which("google-chrome"):
+            filtered.insert(0, "google-chrome.desktop")
+        run(["gsettings", "set", "org.gnome.shell", "favorite-apps", format_gsettings_list(filtered)])
+
+        for desktop_file in APP_DIR.glob("google-chrome-profile*.desktop"):
+            desktop_file.unlink(missing_ok=True)
+        for icon_file in ICON_DIR.glob("google-chrome-profile*.png"):
+            icon_file.unlink(missing_ok=True)
+        run(["update-desktop-database", str(APP_DIR)], check=False)
+
+    def profile_feature_enabled(self):
+        if not self.profiles:
+            return False
+        current = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "favorite-apps"], check=False))
+        return all((APP_DIR / self.desktop_id_for_profile(profile)).exists() for profile in self.profiles) and all(
+            self.desktop_id_for_profile(profile) in current for profile in self.profiles
+        )
+
     def desktop_id_for_profile(self, profile):
         return f"google-chrome-profile-{profile_slug(profile['directory'])}.desktop"
 
@@ -942,6 +1095,84 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
             enabled.append("dock-window-preview@quivio")
         value = "[" + ", ".join(f"'{item}'" for item in enabled) + "]"
         run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", value])
+
+    def disable_hover_extension(self):
+        enabled = [
+            item
+            for item in parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False))
+            if item != "dock-window-preview@quivio"
+        ]
+        run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", format_gsettings_list(enabled)])
+
+    def hover_feature_enabled(self):
+        enabled = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False))
+        return "dock-window-preview@quivio" in enabled
+
+    def enable_copyq_clipboard(self):
+        self.ensure_copyq_installed()
+        AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+        COPYQ_AUTOSTART.write_text(
+            """[Desktop Entry]
+Type=Application
+Name=CopyQ
+Comment=Clipboard manager
+Exec=copyq
+Terminal=false
+X-GNOME-Autostart-enabled=true
+""",
+            encoding="utf-8",
+        )
+        self.configure_custom_shortcut(
+            CLIPBOARD_SHORTCUT_PATH,
+            "Clipboard History",
+            "copyq toggle",
+            "<Super>v",
+        )
+        subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def disable_copyq_clipboard(self):
+        COPYQ_AUTOSTART.unlink(missing_ok=True)
+        self.remove_custom_shortcut(CLIPBOARD_SHORTCUT_PATH)
+        if shutil.which("copyq"):
+            run(["copyq", "exit"], check=False)
+
+    def ensure_copyq_installed(self):
+        if shutil.which("copyq"):
+            return
+        if not shutil.which("pkexec"):
+            raise RuntimeError("CopyQ is not installed and pkexec is unavailable. Install it with: sudo apt install copyq")
+        self.log("CopyQ is not installed. Ubuntu will ask for your password to install it.")
+        run(["pkexec", "apt-get", "install", "-y", "copyq"])
+
+    def configure_custom_shortcut(self, path, name, command, binding):
+        current = parse_gsettings_list(
+            run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
+        )
+        if path not in current:
+            current.append(path)
+        run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", format_gsettings_list(current)])
+        schema = f"org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:{path}"
+        run(["gsettings", "set", schema, "name", name])
+        run(["gsettings", "set", schema, "command", command])
+        run(["gsettings", "set", schema, "binding", binding])
+
+    def remove_custom_shortcut(self, path):
+        current = [
+            item
+            for item in parse_gsettings_list(
+                run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
+            )
+            if item != path
+        ]
+        run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", format_gsettings_list(current)])
+
+    def clipboard_feature_enabled(self):
+        if not shutil.which("copyq") or not COPYQ_AUTOSTART.exists():
+            return False
+        current = parse_gsettings_list(
+            run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
+        )
+        return CLIPBOARD_SHORTCUT_PATH in current
 
 
 class ChromeDockProfiles(Gtk.Application):

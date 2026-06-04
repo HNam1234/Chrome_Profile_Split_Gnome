@@ -1,6 +1,6 @@
-# Clipboard History
+# Clipboard History With CopyQ
 
-Small GTK clipboard history tool for Ubuntu GNOME.
+Clipboard history setup for Ubuntu GNOME using CopyQ.
 
 ## Install
 
@@ -14,7 +14,7 @@ cd Chrome_Profile_Split_Gnome/clipboard-history
 
 - Press `Super+V` to show clipboard history.
 - Type to search.
-- Press `Enter` or double-click an item to copy it back to the clipboard.
-- The daemon starts automatically on login.
+- Select an item in CopyQ to reuse it.
+- CopyQ starts automatically on login.
 
-This is a user-local install and does not require sudo.
+If CopyQ is not installed yet, the installer asks Ubuntu to install the `copyq` package.
