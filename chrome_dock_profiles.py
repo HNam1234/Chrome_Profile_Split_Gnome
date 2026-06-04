@@ -1130,10 +1130,12 @@ set -e
 
 if ! pgrep -x copyq >/dev/null 2>&1; then
   copyq >/dev/null 2>&1 &
-  sleep 0.4
+  sleep 0.5
 fi
 
-exec copyq toggle
+copyq config item_popup_interval 0 >/dev/null 2>&1 || true
+copyq config native_notifications false >/dev/null 2>&1 || true
+exec copyq show
 """,
             encoding="utf-8",
         )
@@ -1145,6 +1147,8 @@ exec copyq toggle
             "<Super>v",
         )
         subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        run(["copyq", "config", "item_popup_interval", "0"], check=False)
+        run(["copyq", "config", "native_notifications", "false"], check=False)
 
     def disable_copyq_clipboard(self):
         COPYQ_AUTOSTART.unlink(missing_ok=True)

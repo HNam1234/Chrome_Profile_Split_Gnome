@@ -31,10 +31,12 @@ set -e
 
 if ! pgrep -x copyq >/dev/null 2>&1; then
   copyq >/dev/null 2>&1 &
-  sleep 0.4
+  sleep 0.5
 fi
 
-exec copyq toggle
+copyq config item_popup_interval 0 >/dev/null 2>&1 || true
+copyq config native_notifications false >/dev/null 2>&1 || true
+exec copyq show
 EOF
 chmod +x "$shortcut"
 
@@ -59,6 +61,8 @@ gsettings set "$schema" command "$shortcut"
 gsettings set "$schema" binding "<Super>v"
 
 copyq >/dev/null 2>&1 &
+copyq config item_popup_interval 0 >/dev/null 2>&1 || true
+copyq config native_notifications false >/dev/null 2>&1 || true
 
 echo "CopyQ clipboard history installed."
 echo "Use Super+V to open history."
