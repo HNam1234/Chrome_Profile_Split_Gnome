@@ -5,7 +5,8 @@ Small GTK clipboard history tool for Ubuntu GNOME.
 ## Install
 
 ```bash
-cd ~/clipboard-history
+git clone git@github.com:HNam1234/Chrome_Profile_Split_Gnome.git
+cd Chrome_Profile_Split_Gnome/clipboard-history
 ./install.sh
 ```
 
