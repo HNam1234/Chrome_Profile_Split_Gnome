@@ -11,7 +11,7 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib  # noqa: E402
+from gi.repository import Gtk, GLib, Gdk  # noqa: E402
 
 
 HOME = Path.home()
@@ -38,6 +38,84 @@ MOUSE_INSTALL_LOG = CONFIG_DIR / "maccel-install.log"
 MOUSE_PERMISSION_FIXER = BIN_DIR / "chrome-dock-profiles-fix-maccel-permission"
 SENS_MULT_PATH = Path("/sys/module/maccel/parameters/SENS_MULT")
 MACCEL_GROUP = "maccel"
+
+APP_CSS = """
+.app-shell {
+    background-color: @theme_bg_color;
+}
+
+.sidebar {
+    background-color: shade(@theme_bg_color, 0.96);
+    border-right: 1px solid @borders;
+}
+
+.nav-row {
+    padding: 0;
+    border-radius: 0;
+}
+
+.nav-row-box {
+    padding: 10px 12px 10px 0;
+}
+
+.nav-accent {
+    min-width: 4px;
+    border-radius: 0 4px 4px 0;
+    background-color: transparent;
+}
+
+.nav-row:selected {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+
+.nav-row:selected .nav-accent {
+    background-color: @theme_selected_fg_color;
+}
+
+.nav-label {
+    font-weight: 600;
+}
+
+.content-page {
+    background-color: @theme_base_color;
+}
+
+.card {
+    background-color: @theme_bg_color;
+    border: 1px solid @borders;
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.section-title {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.section-subtitle {
+    opacity: 0.78;
+}
+
+.pill {
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.pill-ok {
+    background-color: #2ec27e;
+}
+
+.pill-warn {
+    background-color: #e5a50a;
+}
+
+.pill-err {
+    background-color: #e01b24;
+}
+"""
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -1796,19 +1874,22 @@ exit "$final_status"
 class App(Gtk.ApplicationWindow):
     def __init__(self, application):
         super().__init__(application=application)
+        self.load_css()
         self.set_title("Chrome Dock Profiles")
-        self.set_default_size(880, 680)
+        self.set_default_size(1040, 720)
         self.set_border_width(0)
         self.profiles = []
         self.syncing_style = False
         self.syncing_features = False
+        self.syncing_sidebar = False
         self.mouse_service = MouseMovementService()
         self.mouse_install_process = None
         self.mouse_install_timer_id = None
         self.mouse_permission_fix_process = None
         self.mouse_permission_pending = None
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        root.get_style_context().add_class("app-shell")
         self.add(root)
 
         header = Gtk.HeaderBar()
@@ -1822,41 +1903,74 @@ class App(Gtk.ApplicationWindow):
         refresh_header_button.connect("clicked", self.on_refresh)
         header.pack_end(refresh_header_button)
 
-        notebook = Gtk.Notebook()
-        notebook.set_scrollable(True)
-        root.pack_start(notebook, True, True, 0)
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.stack.set_transition_duration(180)
+        self.stack.connect("notify::visible-child-name", self.on_stack_visible_child_changed)
+
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sidebar.set_size_request(220, -1)
+        sidebar.get_style_context().add_class("sidebar")
+        root.pack_start(sidebar, False, False, 0)
+
+        self.nav_list = Gtk.ListBox()
+        self.nav_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.nav_list.connect("row-selected", self.on_nav_row_selected)
+        sidebar.pack_start(self.nav_list, True, True, 10)
+
+        root.pack_start(self.stack, True, True, 0)
 
         main_scroller, main_tab = self.create_tab_page()
         chrome_scroller, chrome_tab = self.create_tab_page()
         mouse_scroller, mouse_tab = self.create_tab_page()
         clipboard_scroller, clipboard_tab = self.create_tab_page()
+        dock_scroller, dock_tab = self.create_tab_page()
 
-        notebook.append_page(main_scroller, Gtk.Label(label="Main"))
-        notebook.append_page(chrome_scroller, Gtk.Label(label="Chrome Profile"))
-        notebook.append_page(mouse_scroller, Gtk.Label(label="Mouse Movement"))
-        notebook.append_page(clipboard_scroller, Gtk.Label(label="Clipboard"))
+        self.stack.add_titled(main_scroller, "overview", "Overview")
+        self.stack.add_titled(chrome_scroller, "chrome", "Chrome Profiles")
+        self.stack.add_titled(mouse_scroller, "mouse", "Mouse")
+        self.stack.add_titled(clipboard_scroller, "clipboard", "Clipboard")
+        self.stack.add_titled(dock_scroller, "dock", "Dock Style")
+
+        for name, title, icon in (
+            ("overview", "Overview", "view-dashboard-symbolic"),
+            ("chrome", "Chrome Profiles", "web-browser-symbolic"),
+            ("mouse", "Mouse", "input-mouse-symbolic"),
+            ("clipboard", "Clipboard", "edit-paste-symbolic"),
+            ("dock", "Dock Style", "preferences-desktop-symbolic"),
+        ):
+            self.nav_list.add(self.create_nav_row(name, title, icon))
 
         intro = Gtk.Label()
-        intro.set_markup("<span size='large'><b>Chrome Dock Profiles</b></span>")
+        intro.set_markup("<span size='large'><b>Overview</b></span>")
         intro.set_xalign(0)
         intro.set_line_wrap(True)
         main_tab.pack_start(intro, False, False, 0)
 
         description = Gtk.Label(
-            label="System overview for Chrome profile dock icons, clipboard history, mouse movement, and dock behavior."
+            label="System overview for profile dock icons, clipboard history, mouse movement, and dock behavior."
         )
         description.set_xalign(0)
         description.set_line_wrap(True)
         main_tab.pack_start(description, False, False, 0)
 
-        self.compatibility_card = self.create_card("System Check")
+        summary_card = self.create_card("At a Glance", "Current setup status for the main tools.")
+        main_tab.pack_start(summary_card, False, False, 0)
+        self.overview_summary_box = Gtk.FlowBox()
+        self.overview_summary_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.overview_summary_box.set_max_children_per_line(4)
+        self.overview_summary_box.set_column_spacing(8)
+        self.overview_summary_box.set_row_spacing(8)
+        summary_card.pack_start(self.overview_summary_box, False, False, 0)
+
+        self.compatibility_card = self.create_card("System Check", "Linux, GNOME, Chrome, and helper availability.")
         main_tab.pack_start(self.compatibility_card, False, False, 0)
         self.compatibility_label = Gtk.Label()
         self.compatibility_label.set_xalign(0)
         self.compatibility_label.set_line_wrap(True)
         self.compatibility_card.pack_start(self.compatibility_label, False, False, 0)
 
-        status_card = self.create_card("Activity")
+        status_card = self.create_card("Activity", "Recent app actions and status messages.")
         main_tab.pack_start(status_card, False, False, 0)
 
         self.status_label = Gtk.Label(label="Ready.")
@@ -1874,19 +1988,19 @@ class App(Gtk.ApplicationWindow):
         status_card.pack_start(log_scroller, True, True, 8)
 
         chrome_intro = Gtk.Label()
-        chrome_intro.set_markup("<span size='large'><b>Chrome Profile</b></span>")
+        chrome_intro.set_markup("<span size='large'><b>Chrome Profiles</b></span>")
         chrome_intro.set_xalign(0)
         chrome_intro.set_line_wrap(True)
         chrome_tab.pack_start(chrome_intro, False, False, 0)
 
         chrome_description = Gtk.Label(
-            label="Install profile-specific launchers, choose how dock clicks behave, and add hover window previews."
+            label="Install profile-specific launchers and add hover window previews."
         )
         chrome_description.set_xalign(0)
         chrome_description.set_line_wrap(True)
         chrome_tab.pack_start(chrome_description, False, False, 0)
 
-        feature_card = self.create_card("Chrome Features")
+        feature_card = self.create_card("Chrome Features", "One-time setup for separate profile icons and previews.")
         chrome_tab.pack_start(feature_card, False, False, 0)
 
         self.profile_switch = self.create_feature_switch(
@@ -1902,24 +2016,40 @@ class App(Gtk.ApplicationWindow):
             self.on_hover_feature_toggled,
         )
 
-        mouse_card = self.create_card("Mouse Movement")
+        setup_card = self.create_card("Manual Actions", "Regenerate or pin profile launchers when Chrome profiles change.")
+        chrome_tab.pack_start(setup_card, False, False, 0)
+
+        setup_grid = Gtk.Grid(column_spacing=12, row_spacing=12)
+        setup_card.pack_start(setup_grid, False, False, 0)
+
+        install_button = self.create_primary_button("Update Profile Icons", "Regenerate profile launchers without changing feature switches.")
+        install_button.connect("clicked", self.on_install_profiles)
+        setup_grid.attach(install_button, 0, 0, 1, 1)
+
+        pin_button = self.create_primary_button("Pin To Dock", "Replace the single Chrome dock icon with profile icons.")
+        pin_button.connect("clicked", self.on_pin_profiles)
+        setup_grid.attach(pin_button, 1, 0, 1, 1)
+
+        hover_button = self.create_primary_button("Install Hover Previews", "Show window thumbnails when hovering dock icons.")
+        hover_button.connect("clicked", self.on_install_hover)
+        setup_grid.attach(hover_button, 2, 0, 1, 1)
+
+        profile_card = self.create_card("Detected Profiles", "Chrome profiles found on this machine.")
+        chrome_tab.pack_start(profile_card, True, True, 0)
+
+        self.profile_list = Gtk.ListBox()
+        self.profile_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        profile_card.pack_start(self.profile_list, True, True, 0)
+
+        mouse_card = self.create_card("Mouse Movement", "Make Linux mouse movement feel closer to Windows or macOS.")
         mouse_tab.pack_start(mouse_card, False, False, 0)
-
-        mouse_title = Gtk.Label()
-        mouse_title.set_markup("<span size='large'><b>Mouse Movement</b></span>")
-        mouse_title.set_xalign(0)
-        mouse_card.pack_start(mouse_title, False, False, 0)
-
-        mouse_description = Gtk.Label(label="Make Linux mouse movement feel closer to Windows or macOS.")
-        mouse_description.set_xalign(0)
-        mouse_description.set_line_wrap(True)
-        mouse_card.pack_start(mouse_description, False, False, 0)
 
         install_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         mouse_card.pack_start(install_row, False, False, 0)
 
         self.mouse_backend_indicator = Gtk.Label()
         self.mouse_backend_indicator.set_xalign(0)
+        self.mouse_backend_indicator.get_style_context().add_class("pill")
         install_row.pack_start(self.mouse_backend_indicator, True, True, 0)
 
         self.mouse_install_button = Gtk.Button(label="Install maccel")
@@ -2016,26 +2146,8 @@ class App(Gtk.ApplicationWindow):
         self.mouse_warning_label.set_line_wrap(True)
         mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
-        setup_card = self.create_card("Manual Actions")
-        chrome_tab.pack_start(setup_card, False, False, 0)
-
-        setup_grid = Gtk.Grid(column_spacing=12, row_spacing=12)
-        setup_card.pack_start(setup_grid, False, False, 0)
-
-        install_button = self.create_primary_button("Update Profile Icons", "Regenerate profile launchers without changing feature switches.")
-        install_button.connect("clicked", self.on_install_profiles)
-        setup_grid.attach(install_button, 0, 0, 1, 1)
-
-        pin_button = self.create_primary_button("Pin To Dock", "Replace the single Chrome dock icon with profile icons.")
-        pin_button.connect("clicked", self.on_pin_profiles)
-        setup_grid.attach(pin_button, 1, 0, 1, 1)
-
-        hover_button = self.create_primary_button("Install Hover Previews", "Show window thumbnails when hovering dock icons.")
-        hover_button.connect("clicked", self.on_install_hover)
-        setup_grid.attach(hover_button, 2, 0, 1, 1)
-
-        style_card = self.create_card("Dock Click Style")
-        chrome_tab.pack_start(style_card, False, False, 0)
+        style_card = self.create_card("Dock Click Style", "Choose how a normal left-click on a dock icon behaves.")
+        dock_tab.pack_start(style_card, False, False, 0)
 
         style_hint = Gtk.Label(label="Choose how a normal left-click on a dock icon behaves.")
         style_hint.set_xalign(0)
@@ -2060,13 +2172,6 @@ class App(Gtk.ApplicationWindow):
         self.style_description.set_line_wrap(True)
         style_card.pack_start(self.style_description, False, False, 0)
 
-        profile_card = self.create_card("Detected Profiles")
-        chrome_tab.pack_start(profile_card, True, True, 0)
-
-        self.profile_list = Gtk.ListBox()
-        self.profile_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        profile_card.pack_start(self.profile_list, True, True, 0)
-
         clipboard_intro = Gtk.Label()
         clipboard_intro.set_markup("<span size='large'><b>Clipboard</b></span>")
         clipboard_intro.set_xalign(0)
@@ -2078,7 +2183,7 @@ class App(Gtk.ApplicationWindow):
         clipboard_description.set_line_wrap(True)
         clipboard_tab.pack_start(clipboard_description, False, False, 0)
 
-        clipboard_card = self.create_card("Clipboard History")
+        clipboard_card = self.create_card("Clipboard History", "Keep CopyQ running after login and use Super+V.")
         clipboard_tab.pack_start(clipboard_card, False, False, 0)
 
         self.clipboard_switch = self.create_feature_switch(
@@ -2103,30 +2208,106 @@ class App(Gtk.ApplicationWindow):
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_overview_summary()
+        self.stack.set_visible_child_name("overview")
+        self.nav_list.select_row(self.nav_list.get_row_at_index(0))
         GLib.idle_add(self.ensure_startup_features_once)
+
+    def load_css(self):
+        try:
+            provider = Gtk.CssProvider()
+            provider.load_from_data(APP_CSS.encode("utf-8"))
+            screen = Gdk.Screen.get_default()
+            if screen is not None:
+                Gtk.StyleContext.add_provider_for_screen(
+                    screen,
+                    provider,
+                    Gtk.STYLE_PROVIDER_PRIORITY_USER,
+                )
+        except Exception:
+            pass
 
     def create_tab_page(self):
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.get_style_context().add_class("content-page")
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         page.set_border_width(20)
         scroller.add(page)
         return scroller, page
 
-    def create_card(self, title):
+    def create_card(self, title, subtitle=None):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_border_width(14)
+        box.get_style_context().add_class("card")
 
         label = Gtk.Label()
-        label.set_markup(f"<b>{title}</b>")
+        label.set_text(title)
         label.set_xalign(0)
+        label.get_style_context().add_class("section-title")
         box.pack_start(label, False, False, 0)
+        if subtitle:
+            subtitle_label = Gtk.Label(label=subtitle)
+            subtitle_label.set_xalign(0)
+            subtitle_label.set_line_wrap(True)
+            subtitle_label.get_style_context().add_class("section-subtitle")
+            box.pack_start(subtitle_label, False, False, 0)
         return box
+
+    def make_pill(self, text, level):
+        label = Gtk.Label(label=text)
+        label.set_xalign(0.5)
+        context = label.get_style_context()
+        context.add_class("pill")
+        context.add_class(f"pill-{level}")
+        return label
+
+    def create_nav_row(self, stack_name, title, icon_name):
+        row = Gtk.ListBoxRow()
+        row.stack_name = stack_name
+        row.get_style_context().add_class("nav-row")
+        container = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        container.get_style_context().add_class("nav-row-box")
+        accent = Gtk.Box()
+        accent.set_size_request(4, 1)
+        accent.get_style_context().add_class("nav-accent")
+        container.pack_start(accent, False, False, 0)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        content.set_margin_left(12)
+        icon = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
+        content.pack_start(icon, False, False, 0)
+        label = Gtk.Label(label=title)
+        label.set_xalign(0)
+        label.get_style_context().add_class("nav-label")
+        content.pack_start(label, True, True, 0)
+        container.pack_start(content, True, True, 0)
+        row.add(container)
+        return row
+
+    def on_nav_row_selected(self, _listbox, row):
+        if row is None or self.syncing_sidebar:
+            return
+        self.stack.set_visible_child_name(row.stack_name)
+
+    def on_stack_visible_child_changed(self, stack, _param):
+        if not hasattr(self, "nav_list"):
+            return
+        visible = stack.get_visible_child_name()
+        self.syncing_sidebar = True
+        try:
+            for row in self.nav_list.get_children():
+                if getattr(row, "stack_name", None) == visible:
+                    self.nav_list.select_row(row)
+                    break
+        finally:
+            self.syncing_sidebar = False
 
     def create_primary_button(self, title, tooltip):
         button = Gtk.Button(label=title)
         button.set_tooltip_text(tooltip)
         button.set_hexpand(True)
+        button.get_style_context().add_class("suggested-action")
         return button
 
     def create_feature_switch(self, parent, title, detail, callback):
@@ -2190,6 +2371,7 @@ class App(Gtk.ApplicationWindow):
             support += " Chrome/Chromium executable was not found in PATH."
 
         self.compatibility_label.set_text(f"{support}\n\n" + "\n".join(lines))
+        self.refresh_overview_summary()
         return browser_id
 
     def refresh_feature_state(self):
@@ -2199,6 +2381,7 @@ class App(Gtk.ApplicationWindow):
         self.clipboard_switch.set_active(self.clipboard_feature_enabled())
         self.syncing_features = False
         self.refresh_clipboard_state()
+        self.refresh_overview_summary()
 
     def refresh_clipboard_state(self):
         if not hasattr(self, "clipboard_status_label"):
@@ -2217,6 +2400,50 @@ class App(Gtk.ApplicationWindow):
             f"Saved setting: {'always run clipboard at login' if config_enabled else 'off'}",
         ]
         self.clipboard_status_label.set_text("\n".join(lines))
+        self.refresh_overview_summary()
+
+    def refresh_overview_summary(self):
+        if not hasattr(self, "overview_summary_box"):
+            return
+        for child in self.overview_summary_box.get_children():
+            child.destroy()
+
+        try:
+            chrome_ready = self.profile_feature_enabled()
+        except Exception:
+            chrome_ready = False
+        try:
+            hover_ready = self.hover_feature_enabled()
+        except Exception:
+            hover_ready = False
+        try:
+            mouse_installed = self.mouse_service.isMaccelInstalled()
+            mouse_detected = self.mouse_service.getDetectedPresetState()
+        except Exception:
+            mouse_installed = False
+            mouse_detected = "unknown"
+        try:
+            clipboard_ready = self.clipboard_feature_enabled()
+        except Exception:
+            clipboard_ready = False
+        try:
+            style_action = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False).strip("'")
+        except Exception:
+            style_action = "unknown"
+
+        pills = [
+            ("Chrome Profiles: On" if chrome_ready else "Chrome Profiles: Setup", "ok" if chrome_ready else "warn"),
+            ("Hover Previews: On" if hover_ready else "Hover Previews: Off", "ok" if hover_ready else "warn"),
+            (
+                f"Mouse: {self.mouse_preset_label(mouse_detected)}" if mouse_installed else "Mouse: maccel missing",
+                "ok" if mouse_installed and mouse_detected not in {"unknown", "default_ubuntu"} else ("warn" if mouse_installed else "err"),
+            ),
+            ("Clipboard: On" if clipboard_ready else "Clipboard: Off", "ok" if clipboard_ready else "warn"),
+            (f"Dock: {style_action or 'unknown'}", "ok" if style_action else "warn"),
+        ]
+        for text, level in pills:
+            self.overview_summary_box.add(self.make_pill(text, level))
+        self.overview_summary_box.show_all()
 
     def refresh_mouse_movement_state(self):
         env = self.mouse_service.getEnvironment()
@@ -2249,8 +2476,10 @@ class App(Gtk.ApplicationWindow):
 
         if maccel_available:
             self.mouse_backend_indicator.set_markup("<b>[V] maccel installed</b>")
+            self.set_widget_level(self.mouse_backend_indicator, "ok")
         else:
             self.mouse_backend_indicator.set_markup("<b>[X] maccel not installed</b>")
+            self.set_widget_level(self.mouse_backend_indicator, "err")
 
         if maccel_available:
             self.mouse_backend_label.set_text("Backend: maccel detected")
@@ -2314,6 +2543,13 @@ class App(Gtk.ApplicationWindow):
             except Exception:
                 pass
         self.mouse_warning_label.set_text("\n".join(warning_lines))
+        self.refresh_overview_summary()
+
+    def set_widget_level(self, widget, level):
+        context = widget.get_style_context()
+        for class_name in ("pill-ok", "pill-warn", "pill-err"):
+            context.remove_class(class_name)
+        context.add_class(f"pill-{level}")
 
     def mouse_preset_label(self, preset, saved=False):
         labels = {
@@ -2376,6 +2612,7 @@ class App(Gtk.ApplicationWindow):
         else:
             self.style_description.set_text(f"Current dock click action: {current or 'unknown'}")
         self.syncing_style = False
+        self.refresh_overview_summary()
 
     def describe_style(self, action):
         for _name, (style_action, help_text) in STYLE_ACTIONS.items():
@@ -2451,6 +2688,7 @@ class App(Gtk.ApplicationWindow):
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_overview_summary()
 
     def on_install_profiles(self, _button):
         try:
