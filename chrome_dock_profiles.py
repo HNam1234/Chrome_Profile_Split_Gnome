@@ -703,6 +703,79 @@ class MaccelBackend:
         return [str(value) for value in values]
 
 
+class MaccelCompatibilityPatchManager:
+    def __init__(self, clone_dir=Path("/opt/maccel")):
+        self.clone_dir = Path(clone_dir)
+        self.report = {
+            "maccelVersion": "unknown",
+            "sourceDir": "",
+            "patches": [],
+        }
+
+    def detectMaccelVersion(self):
+        pkgbuild = self.clone_dir / "PKGBUILD"
+        if not pkgbuild.exists():
+            return "unknown"
+        for line in pkgbuild.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("pkgver="):
+                version = line.partition("=")[2].strip()
+                self.report["maccelVersion"] = version or "unknown"
+                return self.report["maccelVersion"]
+        return "unknown"
+
+    def findDkmsSourceDir(self, version):
+        source_dir = Path(f"/usr/src/maccel-{version}")
+        self.report["sourceDir"] = str(source_dir)
+        return source_dir
+
+    def findProblematicEnumSyntax(self, sourceDir):
+        source_dir = Path(sourceDir)
+        if not source_dir.exists():
+            return []
+        matches = []
+        for path in source_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if "enum accel_mode :" in path.read_text(encoding="utf-8", errors="replace"):
+                    matches.append(path)
+            except Exception:
+                continue
+        return matches
+
+    def applyEnumSyntaxPatch(self, sourceDir):
+        patched = []
+        for path in self.findProblematicEnumSyntax(sourceDir):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            path.write_text(text.replace("enum accel_mode : unsigned char", "enum accel_mode"), encoding="utf-8")
+            patched.append(path)
+        return patched
+
+    def verifyEnumSyntaxPatch(self, sourceDir):
+        return not self.findProblematicEnumSyntax(sourceDir)
+
+    def applyPatchesIfNeeded(self, sourceDir):
+        needed = bool(self.findProblematicEnumSyntax(sourceDir))
+        applied = False
+        if needed:
+            applied = bool(self.applyEnumSyntaxPatch(sourceDir))
+        verified = self.verifyEnumSyntaxPatch(sourceDir)
+        self.report["patches"].append(
+            {
+                "name": "enum_accel_mode_c_syntax",
+                "needed": needed,
+                "applied": applied,
+                "verified": verified,
+            }
+        )
+        if needed and not verified:
+            raise RuntimeError("enum_accel_mode_c_syntax compatibility patch failed verification.")
+        return self.report
+
+    def generatePatchReport(self):
+        return self.report
+
+
 class MouseMovementService:
     def __init__(self):
         self.backend = MaccelBackend(self._log_command)
@@ -840,6 +913,126 @@ if [ -n "$kernel_compiler" ]; then
   compiler_package="$kernel_compiler"
 fi
 
+detectMaccelVersion() {{
+  grep "pkgver=" /opt/maccel/PKGBUILD | grep -oP '\\d\\.\\d\\.\\d' | head -n 1
+}}
+
+findDkmsSourceDir() {{
+  version="$1"
+  printf "/usr/src/maccel-%s" "$version"
+}}
+
+findProblematicEnumSyntax() {{
+  source_dir="$1"
+  grep -R "enum accel_mode :" "$source_dir" 2>/dev/null || true
+}}
+
+applyEnumSyntaxPatch() {{
+  source_dir="$1"
+  matches="$(findProblematicEnumSyntax "$source_dir")"
+  if [ -z "$matches" ]; then
+    echo "Patch enum_accel_mode_c_syntax: not needed"
+    return 0
+  fi
+
+  echo "Patch enum_accel_mode_c_syntax: needed"
+  while IFS= read -r file; do
+    file="${{file%%:*}}"
+    if [ -n "$file" ] && [ -f "$file" ]; then
+      sed -i 's/enum accel_mode : unsigned char/enum accel_mode/g' "$file"
+    fi
+  done <<EOF_PATCH_MATCHES
+$matches
+EOF_PATCH_MATCHES
+  echo "Patch enum_accel_mode_c_syntax: applied"
+}}
+
+verifyEnumSyntaxPatch() {{
+  source_dir="$1"
+  if findProblematicEnumSyntax "$source_dir" | grep -q "enum accel_mode :"; then
+    echo "Patch enum_accel_mode_c_syntax: failed verification"
+    return 1
+  fi
+  echo "Patch enum_accel_mode_c_syntax: verified"
+  return 0
+}}
+
+applyCompilerPatchIfNeeded() {{
+  source_dir="$1"
+  version="$2"
+  if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
+    echo "Patch compiler_path: using $kernel_compiler"
+    sed -i "s|^MAKE\\[0\\]=.*|MAKE[0]=\\"make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=''\\\"|" "$source_dir/dkms.conf"
+    sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "$source_dir/Makefile"
+    export CC="$kernel_compiler"
+  else
+    echo "Patch compiler_path: not needed"
+  fi
+}}
+
+applyDkmsConfigPatchIfNeeded() {{
+  source_dir="$1"
+  if grep -q "@_PKGNAME@\\|@PKGVER@\\|@DRIVER_CFLAGS@" "$source_dir/dkms.conf"; then
+    echo "Patch dkms_config_template: failed"
+    return 1
+  fi
+  echo "Patch dkms_config_template: verified"
+}}
+
+applyPatchesIfNeeded() {{
+  source_dir="$1"
+  version="$2"
+  enum_needed=false
+  enum_applied=false
+  enum_verified=false
+  if [ -n "$(findProblematicEnumSyntax "$source_dir")" ]; then
+    enum_needed=true
+  fi
+  applyEnumSyntaxPatch "$source_dir"
+  if [ "$enum_needed" = true ]; then
+    enum_applied=true
+  fi
+  verifyEnumSyntaxPatch "$source_dir"
+  enum_verified=true
+
+  echo "{{"
+  echo "  \\"maccelVersion\\": \\"$version\\","
+  echo "  \\"sourceDir\\": \\"$source_dir\\","
+  echo "  \\"patches\\": ["
+  echo "    {{\\"name\\": \\"enum_accel_mode_c_syntax\\", \\"needed\\": $enum_needed, \\"applied\\": $enum_applied, \\"verified\\": $enum_verified}}"
+  echo "  ]"
+  echo "}}"
+
+  if [ -d /opt/maccel ]; then
+    applyEnumSyntaxPatch /opt/maccel
+    verifyEnumSyntaxPatch /opt/maccel
+  fi
+  applyCompilerPatchIfNeeded "$source_dir" "$version"
+  applyDkmsConfigPatchIfNeeded "$source_dir"
+}}
+
+showDkmsMakeLog() {{
+  version="$1"
+  make_log="/var/lib/dkms/maccel/$version/build/make.log"
+  if [ -f "$make_log" ]; then
+    echo "==== DKMS make.log: $make_log ===="
+    cat "$make_log"
+    echo "==== end DKMS make.log ===="
+  else
+    echo "DKMS make.log was not found at $make_log"
+  fi
+}}
+
+checkSecureBootWarning() {{
+  if command -v mokutil >/dev/null 2>&1; then
+    sb_state="$(mokutil --sb-state 2>/dev/null || true)"
+    echo "Secure Boot state: $sb_state"
+    if printf "%s" "$sb_state" | grep -qi "enabled"; then
+      echo "WARNING: Secure Boot is enabled. The maccel kernel module may need signing before modprobe can load it."
+    fi
+  fi
+}}
+
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   packages=(curl git make dkms gcc sudo wget ca-certificates "linux-headers-$(uname -r)")
@@ -858,31 +1051,48 @@ rm -rf /opt/maccel
 git clone --depth 1 https://github.com/Gnarus-G/maccel.git /opt/maccel
 cd /opt/maccel
 
+dkms_version="$(detectMaccelVersion)"
+if [ -z "$dkms_version" ]; then
+  echo "Could not detect maccel version from /opt/maccel/PKGBUILD."
+  exit 1
+fi
+echo "Preparing DKMS module maccel/$dkms_version..."
+dkms remove -m maccel -v "$dkms_version" --all || true
+dkms_source_dir="$(findDkmsSourceDir "$dkms_version")"
+rm -rf "$dkms_source_dir"
+install -Dm 644 dkms.conf "$dkms_source_dir/dkms.conf"
+sed -e "s/@_PKGNAME@/maccel/" \
+    -e "s/@PKGVER@/$dkms_version/" \
+    -e "s/@DRIVER_CFLAGS@/''/" \
+    -i "$dkms_source_dir/dkms.conf"
+cp -r driver/. "$dkms_source_dir/"
+
 echo "Installing udev rules..."
 make udev_uninstall || true
 make udev_install
 
-dkms_version="$(grep "pkgver=" PKGBUILD | grep -oP '\\d\\.\\d\\.\\d')"
-echo "Preparing DKMS module maccel/$dkms_version..."
-dkms remove -m maccel -v "$dkms_version" --all || true
-rm -rf "/usr/src/maccel-$dkms_version"
-install -Dm 644 dkms.conf "/usr/src/maccel-$dkms_version/dkms.conf"
-sed -e "s/@_PKGNAME@/maccel/" \
-    -e "s/@PKGVER@/$dkms_version/" \
-    -e "s/@DRIVER_CFLAGS@/''/" \
-    -i "/usr/src/maccel-$dkms_version/dkms.conf"
-cp -r driver/. "/usr/src/maccel-$dkms_version/"
-
-if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
-  echo "Using kernel compiler: $kernel_compiler"
-  sed -i "s|^MAKE\\[0\\]=.*|MAKE[0]=\\"make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=''\\\"|" "/usr/src/maccel-$dkms_version/dkms.conf"
-  sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "/usr/src/maccel-$dkms_version/Makefile"
-  export CC="$kernel_compiler"
-fi
+echo "Applying compatibility patches..."
+applyPatchesIfNeeded "$dkms_source_dir" "$dkms_version"
 
 echo "Building and installing DKMS module..."
-dkms install --force "maccel/$dkms_version"
-modprobe maccel
+if ! dkms add -m maccel -v "$dkms_version"; then
+  showDkmsMakeLog "$dkms_version"
+  exit 1
+fi
+if ! dkms build -m maccel -v "$dkms_version"; then
+  showDkmsMakeLog "$dkms_version"
+  exit 1
+fi
+if ! dkms install --force -m maccel -v "$dkms_version"; then
+  showDkmsMakeLog "$dkms_version"
+  exit 1
+fi
+
+if ! modprobe maccel; then
+  echo "modprobe maccel failed."
+  checkSecureBootWarning
+  exit 1
+fi
 
 echo "Installing maccel CLI..."
 mkdir -p /opt/maccel/bin
