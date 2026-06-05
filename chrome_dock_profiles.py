@@ -962,7 +962,14 @@ applyCompilerPatchIfNeeded() {{
   version="$2"
   if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
     echo "Patch compiler_path: using $kernel_compiler"
-    sed -i "s|^MAKE\\[0\\]=.*|MAKE[0]=\\"make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=''\\\"|" "$source_dir/dkms.conf"
+    cat > "$source_dir/dkms.conf" <<EOF_DKMS_CONFIG
+PACKAGE_NAME="maccel"
+PACKAGE_VERSION="$version"
+MAKE[0]="make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=''"
+BUILT_MODULE_NAME[0]="maccel"
+DEST_MODULE_LOCATION[0]="/kernel/drivers/usb"
+AUTOINSTALL="yes"
+EOF_DKMS_CONFIG
     sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "$source_dir/Makefile"
     export CC="$kernel_compiler"
   else
@@ -972,9 +979,15 @@ applyCompilerPatchIfNeeded() {{
 
 applyDkmsConfigPatchIfNeeded() {{
   source_dir="$1"
-  if grep -q "@_PKGNAME@\\|@PKGVER@\\|@DRIVER_CFLAGS@" "$source_dir/dkms.conf"; then
+  if grep -q "@_PKGNAME@\\|@PKGVER@" "$source_dir/dkms.conf"; then
     echo "Patch dkms_config_template: failed"
     return 1
+  fi
+  if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
+    if ! grep -q "CC=$kernel_compiler" "$source_dir/dkms.conf"; then
+      echo "Patch dkms_config_template: failed missing CC=$kernel_compiler"
+      return 1
+    fi
   fi
   echo "Patch dkms_config_template: verified"
 }}
