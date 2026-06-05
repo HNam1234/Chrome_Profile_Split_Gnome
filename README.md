@@ -18,16 +18,16 @@ cd Chrome_Profile_Split_Gnome
 
 Then open **Chrome Dock Profiles** from Applications.
 
-The app gives you a guided GUI with:
+The app gives you a guided tabbed GUI with:
 
-- A system compatibility check.
+- A Main tab with system overview and activity.
 - Detected Chrome/Chromium profile cards.
 - One-click install/update for profile dock icons.
 - One-click pinning to Ubuntu Dock.
 - Dock click style choices.
 - Hover preview extension installation.
-- CopyQ clipboard history toggle with `Super+V` binding.
-- Mouse Movement presets with Windows, macOS, and Restore Previous buttons.
+- A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
+- A Mouse Movement tab with Windows, macOS, and Restore Previous buttons.
 
 ## What It Does
 

@@ -792,36 +792,72 @@ class App(Gtk.ApplicationWindow):
         refresh_header_button.connect("clicked", self.on_refresh)
         header.pack_end(refresh_header_button)
 
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        root.pack_start(scroller, True, True, 0)
+        notebook = Gtk.Notebook()
+        notebook.set_scrollable(True)
+        root.pack_start(notebook, True, True, 0)
 
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        content.set_border_width(20)
-        scroller.add(content)
+        main_scroller, main_tab = self.create_tab_page()
+        chrome_scroller, chrome_tab = self.create_tab_page()
+        mouse_scroller, mouse_tab = self.create_tab_page()
+        clipboard_scroller, clipboard_tab = self.create_tab_page()
+
+        notebook.append_page(main_scroller, Gtk.Label(label="Main"))
+        notebook.append_page(chrome_scroller, Gtk.Label(label="Chrome Profile"))
+        notebook.append_page(mouse_scroller, Gtk.Label(label="Mouse Movement"))
+        notebook.append_page(clipboard_scroller, Gtk.Label(label="Clipboard"))
 
         intro = Gtk.Label()
-        intro.set_markup("<span size='large'><b>Make Chrome profiles behave like separate dock apps.</b></span>")
+        intro.set_markup("<span size='large'><b>Chrome Dock Profiles</b></span>")
         intro.set_xalign(0)
         intro.set_line_wrap(True)
-        content.pack_start(intro, False, False, 0)
+        main_tab.pack_start(intro, False, False, 0)
 
         description = Gtk.Label(
-            label="Install profile-specific launchers, choose how dock clicks behave, and add hover window previews."
+            label="System overview for Chrome profile dock icons, clipboard history, mouse movement, and dock behavior."
         )
         description.set_xalign(0)
         description.set_line_wrap(True)
-        content.pack_start(description, False, False, 0)
+        main_tab.pack_start(description, False, False, 0)
 
         self.compatibility_card = self.create_card("System Check")
-        content.pack_start(self.compatibility_card, False, False, 0)
+        main_tab.pack_start(self.compatibility_card, False, False, 0)
         self.compatibility_label = Gtk.Label()
         self.compatibility_label.set_xalign(0)
         self.compatibility_label.set_line_wrap(True)
         self.compatibility_card.pack_start(self.compatibility_label, False, False, 0)
 
-        feature_card = self.create_card("Features")
-        content.pack_start(feature_card, False, False, 0)
+        status_card = self.create_card("Activity")
+        main_tab.pack_start(status_card, False, False, 0)
+
+        self.status_label = Gtk.Label(label="Ready.")
+        self.status_label.set_xalign(0)
+        self.status_label.set_line_wrap(True)
+        status_card.pack_start(self.status_label, False, False, 0)
+
+        self.log_view = Gtk.TextView()
+        self.log_view.set_editable(False)
+        self.log_view.set_cursor_visible(False)
+        self.log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        log_scroller = Gtk.ScrolledWindow()
+        log_scroller.set_min_content_height(180)
+        log_scroller.add(self.log_view)
+        status_card.pack_start(log_scroller, True, True, 8)
+
+        chrome_intro = Gtk.Label()
+        chrome_intro.set_markup("<span size='large'><b>Chrome Profile</b></span>")
+        chrome_intro.set_xalign(0)
+        chrome_intro.set_line_wrap(True)
+        chrome_tab.pack_start(chrome_intro, False, False, 0)
+
+        chrome_description = Gtk.Label(
+            label="Install profile-specific launchers, choose how dock clicks behave, and add hover window previews."
+        )
+        chrome_description.set_xalign(0)
+        chrome_description.set_line_wrap(True)
+        chrome_tab.pack_start(chrome_description, False, False, 0)
+
+        feature_card = self.create_card("Chrome Features")
+        chrome_tab.pack_start(feature_card, False, False, 0)
 
         self.profile_switch = self.create_feature_switch(
             feature_card,
@@ -835,15 +871,9 @@ class App(Gtk.ApplicationWindow):
             "Install and enable the local GNOME dock hover-preview extension.",
             self.on_hover_feature_toggled,
         )
-        self.clipboard_switch = self.create_feature_switch(
-            feature_card,
-            "Clipboard History (CopyQ)",
-            "Use CopyQ for a smooth community-tested Super+V clipboard history popup.",
-            self.on_clipboard_feature_toggled,
-        )
 
         mouse_card = self.create_card("Mouse Movement")
-        content.pack_start(mouse_card, False, False, 0)
+        mouse_tab.pack_start(mouse_card, False, False, 0)
 
         mouse_title = Gtk.Label()
         mouse_title.set_markup("<span size='large'><b>Mouse Movement</b></span>")
@@ -887,7 +917,7 @@ class App(Gtk.ApplicationWindow):
         mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
         setup_card = self.create_card("Manual Actions")
-        content.pack_start(setup_card, False, False, 0)
+        chrome_tab.pack_start(setup_card, False, False, 0)
 
         setup_grid = Gtk.Grid(column_spacing=12, row_spacing=12)
         setup_card.pack_start(setup_grid, False, False, 0)
@@ -905,7 +935,7 @@ class App(Gtk.ApplicationWindow):
         setup_grid.attach(hover_button, 2, 0, 1, 1)
 
         style_card = self.create_card("Dock Click Style")
-        content.pack_start(style_card, False, False, 0)
+        chrome_tab.pack_start(style_card, False, False, 0)
 
         style_hint = Gtk.Label(label="Choose how a normal left-click on a dock icon behaves.")
         style_hint.set_xalign(0)
@@ -931,34 +961,46 @@ class App(Gtk.ApplicationWindow):
         style_card.pack_start(self.style_description, False, False, 0)
 
         profile_card = self.create_card("Detected Profiles")
-        content.pack_start(profile_card, True, True, 0)
+        chrome_tab.pack_start(profile_card, True, True, 0)
 
         self.profile_list = Gtk.ListBox()
         self.profile_list.set_selection_mode(Gtk.SelectionMode.NONE)
         profile_card.pack_start(self.profile_list, True, True, 0)
 
-        status_card = self.create_card("Activity")
-        content.pack_start(status_card, False, False, 0)
+        clipboard_intro = Gtk.Label()
+        clipboard_intro.set_markup("<span size='large'><b>Clipboard</b></span>")
+        clipboard_intro.set_xalign(0)
+        clipboard_intro.set_line_wrap(True)
+        clipboard_tab.pack_start(clipboard_intro, False, False, 0)
 
-        self.status_label = Gtk.Label(label="Ready.")
-        self.status_label.set_xalign(0)
-        self.status_label.set_line_wrap(True)
-        status_card.pack_start(self.status_label, False, False, 0)
+        clipboard_description = Gtk.Label(label="Use CopyQ for a smooth community-tested Super+V clipboard history popup.")
+        clipboard_description.set_xalign(0)
+        clipboard_description.set_line_wrap(True)
+        clipboard_tab.pack_start(clipboard_description, False, False, 0)
 
-        self.log_view = Gtk.TextView()
-        self.log_view.set_editable(False)
-        self.log_view.set_cursor_visible(False)
-        self.log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        log_scroller = Gtk.ScrolledWindow()
-        log_scroller.set_min_content_height(110)
-        log_scroller.add(self.log_view)
-        status_card.pack_start(log_scroller, False, True, 8)
+        clipboard_card = self.create_card("Clipboard History")
+        clipboard_tab.pack_start(clipboard_card, False, False, 0)
+
+        self.clipboard_switch = self.create_feature_switch(
+            clipboard_card,
+            "Clipboard History (CopyQ)",
+            "Turn CopyQ autostart and the Super+V clipboard popup on or off.",
+            self.on_clipboard_feature_toggled,
+        )
 
         self.refresh_compatibility()
         self.refresh_current_style()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+
+    def create_tab_page(self):
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        page.set_border_width(20)
+        scroller.add(page)
+        return scroller, page
 
     def create_card(self, title):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
