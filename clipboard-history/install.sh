@@ -4,6 +4,9 @@ set -euo pipefail
 shortcut_path="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
 autostart="$HOME/.config/autostart/copyq.desktop"
 shortcut="$HOME/.local/bin/copyq-super-v"
+starter="$HOME/.local/bin/copyq-start"
+service_dir="$HOME/.config/systemd/user"
+service="$service_dir/copyq.service"
 
 if ! command -v copyq >/dev/null 2>&1; then
   if command -v pkexec >/dev/null 2>&1; then
@@ -14,15 +17,47 @@ if ! command -v copyq >/dev/null 2>&1; then
   fi
 fi
 
-mkdir -p "$HOME/.config/autostart" "$HOME/.local/bin"
+mkdir -p "$HOME/.config/autostart" "$HOME/.local/bin" "$service_dir"
+cat > "$starter" <<'EOF'
+#!/usr/bin/env bash
+set -e
+
+if ! pgrep -x copyq >/dev/null 2>&1; then
+  copyq >/dev/null 2>&1 &
+  sleep 0.8
+fi
+
+copyq config item_popup_interval 0 >/dev/null 2>&1 || true
+copyq config native_notifications false >/dev/null 2>&1 || true
+wait
+EOF
+chmod +x "$starter"
+
 cat > "$autostart" <<EOF
 [Desktop Entry]
 Type=Application
 Name=CopyQ
 Comment=Clipboard manager
-Exec=copyq
+Exec=$starter
 Terminal=false
 X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
+EOF
+
+cat > "$service" <<EOF
+[Unit]
+Description=CopyQ clipboard manager
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=$starter
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
 EOF
 
 cat > "$shortcut" <<'EOF'
@@ -63,6 +98,8 @@ gsettings set "$schema" binding "<Super>v"
 copyq >/dev/null 2>&1 &
 copyq config item_popup_interval 0 >/dev/null 2>&1 || true
 copyq config native_notifications false >/dev/null 2>&1 || true
+systemctl --user daemon-reload >/dev/null 2>&1 || true
+systemctl --user enable --now copyq.service >/dev/null 2>&1 || true
 
 echo "CopyQ clipboard history installed."
 echo "Use Super+V to open history."

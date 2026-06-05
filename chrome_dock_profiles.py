@@ -18,10 +18,13 @@ BIN_DIR = HOME / ".local/bin"
 ICON_DIR = HOME / ".local/share/icons/hicolor/256x256/apps"
 EXT_DIR = HOME / ".local/share/gnome-shell/extensions/dock-window-preview@quivio"
 AUTOSTART_DIR = HOME / ".config/autostart"
+SYSTEMD_USER_DIR = HOME / ".config/systemd/user"
 CHROME_CONFIG = HOME / ".config/google-chrome"
 CLIPBOARD_SHORTCUT_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
 COPYQ_AUTOSTART = AUTOSTART_DIR / "copyq.desktop"
 COPYQ_SHORTCUT = BIN_DIR / "copyq-super-v"
+COPYQ_START = BIN_DIR / "copyq-start"
+COPYQ_SERVICE = SYSTEMD_USER_DIR / "copyq.service"
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -926,9 +929,11 @@ class App(Gtk.ApplicationWindow):
             else:
                 self.disable_profile_launchers()
                 self.log("Chrome profile dock icons disabled.")
+            _switch.set_state(state)
             self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed to update profile dock icons: {error}")
+            _switch.set_state(not state)
             self.refresh_feature_state()
         return True
 
@@ -942,9 +947,11 @@ class App(Gtk.ApplicationWindow):
             else:
                 self.disable_hover_extension()
                 self.log("Hover previews disabled. Restart GNOME Shell or log out/in to unload them.")
+            _switch.set_state(state)
             self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed to update hover previews: {error}")
+            _switch.set_state(not state)
             self.refresh_feature_state()
         return True
 
@@ -958,10 +965,12 @@ class App(Gtk.ApplicationWindow):
             else:
                 self.disable_copyq_clipboard()
                 self.log("Clipboard history disabled.")
+            _switch.set_state(state)
             self.refresh_compatibility()
             self.refresh_feature_state()
         except Exception as error:
             self.log(f"Failed to update clipboard history: {error}")
+            _switch.set_state(not state)
             self.refresh_feature_state()
         return True
 
@@ -1113,14 +1122,49 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
         self.ensure_copyq_installed()
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+        SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+        COPYQ_START.write_text(
+            """#!/usr/bin/env bash
+set -e
+
+if ! pgrep -x copyq >/dev/null 2>&1; then
+  copyq >/dev/null 2>&1 &
+  sleep 0.8
+fi
+
+copyq config item_popup_interval 0 >/dev/null 2>&1 || true
+copyq config native_notifications false >/dev/null 2>&1 || true
+wait
+""",
+            encoding="utf-8",
+        )
+        COPYQ_START.chmod(0o755)
         COPYQ_AUTOSTART.write_text(
-            """[Desktop Entry]
+            f"""[Desktop Entry]
 Type=Application
 Name=CopyQ
 Comment=Clipboard manager
-Exec=copyq
+Exec={COPYQ_START}
 Terminal=false
 X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
+""",
+            encoding="utf-8",
+        )
+        COPYQ_SERVICE.write_text(
+            f"""[Unit]
+Description=CopyQ clipboard manager
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart={COPYQ_START}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
 """,
             encoding="utf-8",
         )
@@ -1149,10 +1193,16 @@ exec copyq show
         subprocess.Popen(["copyq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         run(["copyq", "config", "item_popup_interval", "0"], check=False)
         run(["copyq", "config", "native_notifications", "false"], check=False)
+        run(["systemctl", "--user", "daemon-reload"], check=False)
+        run(["systemctl", "--user", "enable", "--now", "copyq.service"], check=False)
 
     def disable_copyq_clipboard(self):
         COPYQ_AUTOSTART.unlink(missing_ok=True)
         COPYQ_SHORTCUT.unlink(missing_ok=True)
+        COPYQ_START.unlink(missing_ok=True)
+        run(["systemctl", "--user", "disable", "--now", "copyq.service"], check=False)
+        COPYQ_SERVICE.unlink(missing_ok=True)
+        run(["systemctl", "--user", "daemon-reload"], check=False)
         self.remove_custom_shortcut(CLIPBOARD_SHORTCUT_PATH)
         if shutil.which("copyq"):
             run(["copyq", "exit"], check=False)
@@ -1188,12 +1238,12 @@ exec copyq show
         run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", format_gsettings_list(current)])
 
     def clipboard_feature_enabled(self):
-        if not shutil.which("copyq") or not COPYQ_AUTOSTART.exists():
+        if not shutil.which("copyq") or not COPYQ_SHORTCUT.exists():
             return False
         current = parse_gsettings_list(
             run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], check=False)
         )
-        return CLIPBOARD_SHORTCUT_PATH in current
+        return CLIPBOARD_SHORTCUT_PATH in current and (COPYQ_AUTOSTART.exists() or COPYQ_SERVICE.exists())
 
 
 class ChromeDockProfiles(Gtk.Application):
