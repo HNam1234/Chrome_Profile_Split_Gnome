@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
+import ast
 import json
 import os
 import platform
 import shutil
 import stat
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import gi
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_DIR = PROJECT_ROOT / "src"
+if SRC_DIR.exists():
+    sys.path.insert(0, str(SRC_DIR))
+
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib, Gdk  # noqa: E402
+
+from linux_toolbox.resources import load_template, load_text  # noqa: E402
 
 
 HOME = Path.home()
@@ -45,84 +54,15 @@ MOUSE_INSTALL_LOG = CONFIG_DIR / "maccel-install.log"
 MOUSE_PERMISSION_FIXER = BIN_DIR / "chrome-dock-profiles-fix-maccel-permission"
 SENS_MULT_PATH = Path("/sys/module/maccel/parameters/SENS_MULT")
 MACCEL_GROUP = "maccel"
+VIETNAMESE_INSTALLER = BIN_DIR / "chrome-dock-profiles-install-vietnamese-input"
+VIETNAMESE_INPUT_LOG = CONFIG_DIR / "vietnamese-input.log"
+BAMBOO_CONFIG_DIR = HOME / ".config/ibus-bamboo"
+BAMBOO_CONFIG_PATH = BAMBOO_CONFIG_DIR / "ibus-bamboo.config.json"
+BAMBOO_CONFIG_BACKUP_PATH = CONFIG_DIR / "ibus-bamboo.config.json.backup"
+GNOME_INPUT_SOURCES_SCHEMA = "org.gnome.desktop.input-sources"
+GNOME_INPUT_SOURCES_KEY = "sources"
+BAMBOO_INPUT_SOURCE = ("ibus", "Bamboo")
 
-APP_CSS = """
-.app-shell {
-    background-color: @theme_bg_color;
-}
-
-.sidebar {
-    background-color: shade(@theme_bg_color, 0.96);
-    border-right: 1px solid @borders;
-}
-
-.nav-row {
-    padding: 0;
-    border-radius: 0;
-}
-
-.nav-row-box {
-    padding: 10px 12px 10px 0;
-}
-
-.nav-accent {
-    min-width: 4px;
-    border-radius: 0 4px 4px 0;
-    background-color: transparent;
-}
-
-.nav-row:selected {
-    background-color: @theme_selected_bg_color;
-    color: @theme_selected_fg_color;
-}
-
-.nav-row:selected .nav-accent {
-    background-color: @theme_selected_fg_color;
-}
-
-.nav-label {
-    font-weight: 600;
-}
-
-.content-page {
-    background-color: @theme_base_color;
-}
-
-.card {
-    background-color: @theme_bg_color;
-    border: 1px solid @borders;
-    border-radius: 12px;
-    padding: 16px;
-}
-
-.section-title {
-    font-size: 18px;
-    font-weight: 700;
-}
-
-.section-subtitle {
-    opacity: 0.78;
-}
-
-.pill {
-    border-radius: 999px;
-    padding: 4px 10px;
-    font-weight: 700;
-    color: #ffffff;
-}
-
-.pill-ok {
-    background-color: #2ec27e;
-}
-
-.pill-warn {
-    background-color: #e5a50a;
-}
-
-.pill-err {
-    background-color: #e01b24;
-}
-"""
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -132,498 +72,10 @@ STYLE_ACTIONS = {
 }
 
 
-WRAPPER = """#!/usr/bin/env bash
-set -u
-
-if [ "$#" -lt 2 ]; then
-  exit 64
-fi
-
-profile_dir=$1
-wm_class=$2
-shift 2
-
-chrome=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
-
-before_ids=""
-if command -v xdotool >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
-  before_ids=$(xdotool search --onlyvisible . 2>/dev/null | sort -u || true)
-fi
-
-"$chrome" --profile-directory="$profile_dir" --class="$wm_class" "$@" &
-
-if ! command -v xdotool >/dev/null 2>&1 || [ -z "${DISPLAY:-}" ]; then
-  exit 0
-fi
-
-is_before_window() {
-  case "
-$before_ids
-" in
-    *"
-$1
-"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-is_chrome_window() {
-  pid=$(xdotool getwindowpid "$1" 2>/dev/null || true)
-  [ -n "${pid:-}" ] || return 1
-
-  exe=""
-  if [ -e "/proc/$pid/exe" ]; then
-    exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
-  fi
-
-  cmdline=""
-  if [ -r "/proc/$pid/cmdline" ]; then
-    cmdline=$(tr '\\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-  fi
-
-  case "$exe $cmdline" in
-    *google-chrome*|*chrome*|*chromium*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-i=0
-while [ "$i" -lt 150 ]; do
-  window_ids=$(xdotool search --onlyvisible . 2>/dev/null | sort -u || true)
-  for window_id in $window_ids; do
-    if ! is_before_window "$window_id" && is_chrome_window "$window_id"; then
-      xdotool set_window --class "$wm_class" --classname "$wm_class" "$window_id" 2>/dev/null || true
-      exit 0
-    fi
-  done
-
-  sleep 0.1
-  i=$((i + 1))
-done
-"""
 
 
-EXTENSION_JS = r"""const { Clutter, GLib, Pango, St } = imports.gi;
-const Main = imports.ui.main;
-
-const HOVER_DELAY_MS = 220;
-const HIDE_DELAY_MS = 260;
-const POINTER_POLL_MS = 90;
-const POPUP_GAP = 12;
-const POPUP_MARGIN = 8;
-const PREVIEW_WIDTH = 260;
-const PREVIEW_HEIGHT = 160;
-
-function clamp(value, min, max) {
-    return Math.min(Math.max(value, min), max);
-}
-
-function hasStyleClass(actor, className) {
-    if (!actor || typeof actor.get_style_class_name !== 'function')
-        return false;
-    const style = actor.get_style_class_name();
-    return typeof style === 'string' && style.split(/\s+/).indexOf(className) !== -1;
-}
-
-function getVisibleAppWindows(app) {
-    if (!app || typeof app.get_windows !== 'function')
-        return [];
-    return app.get_windows().filter(window => {
-        if (!window)
-            return false;
-        if (typeof window.is_skip_taskbar === 'function')
-            return !window.is_skip_taskbar();
-        return !window.skip_taskbar;
-    }).sort((left, right) => {
-        const leftTime = typeof left.get_user_time === 'function' ? left.get_user_time() : 0;
-        const rightTime = typeof right.get_user_time === 'function' ? right.get_user_time() : 0;
-        return rightTime - leftTime;
-    });
-}
-
-class WindowPreviewPopup {
-    constructor() {
-        this._sourceActor = null;
-        this.actor = new St.BoxLayout({
-            style_class: 'dock-preview-popup',
-            vertical: true,
-            reactive: true,
-            can_focus: true,
-            track_hover: true,
-            visible: false,
-        });
-        Main.layoutManager.addTopChrome(this.actor);
-    }
-
-    get visible() {
-        return this.actor.visible;
-    }
-
-    containsActor(actor) {
-        for (let current = actor; current; current = current.get_parent()) {
-            if (current === this.actor)
-                return true;
-        }
-        return false;
-    }
-
-    show(app, windows, sourceActor) {
-        if (!sourceActor || windows.length === 0)
-            return;
-        this._sourceActor = sourceActor;
-        this._clearChildren();
-        this.actor.add_child(new St.Label({
-            style_class: 'dock-preview-header',
-            text: app.get_name(),
-            x_align: Clutter.ActorAlign.START,
-        }));
-        const itemsContainer = new St.BoxLayout({
-            style_class: 'dock-preview-items',
-            vertical: true,
-            x_expand: true,
-        });
-        this.actor.add_child(itemsContainer);
-        for (const window of windows)
-            itemsContainer.add_child(this._createWindowButton(window, app));
-        this.actor.show();
-        this._positionNearSource();
-    }
-
-    hide() {
-        this._sourceActor = null;
-        this.actor.hide();
-    }
-
-    destroy() {
-        this._clearChildren();
-        Main.layoutManager.removeChrome(this.actor);
-        this.actor.destroy();
-        this.actor = null;
-    }
-
-    _clearChildren() {
-        for (const child of this.actor.get_children())
-            child.destroy();
-    }
-
-    _createWindowButton(metaWindow, app) {
-        const button = new St.Button({
-            style_class: 'dock-preview-item',
-            reactive: true,
-            can_focus: true,
-            track_hover: true,
-            x_expand: true,
-        });
-        const layout = new St.BoxLayout({ vertical: true, x_expand: true });
-        layout.add_child(this._createThumbnail(metaWindow, app));
-        layout.add_child(this._createTitleLabel(metaWindow, app));
-        button.set_child(layout);
-        button.connect('clicked', () => {
-            this.hide();
-            Main.activateWindow(metaWindow);
-        });
-        return button;
-    }
-
-    _createTitleLabel(metaWindow, app) {
-        const titleLabel = new St.Label({
-            style_class: 'dock-preview-title',
-            text: metaWindow.get_title() || app.get_name(),
-            x_align: Clutter.ActorAlign.START,
-        });
-        titleLabel.set_width(PREVIEW_WIDTH);
-        if (titleLabel.clutter_text) {
-            titleLabel.clutter_text.single_line_mode = true;
-            titleLabel.clutter_text.line_wrap = false;
-            titleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-        }
-        return titleLabel;
-    }
-
-    _createThumbnail(metaWindow, app) {
-        const thumbnail = new St.Widget({
-            style_class: 'dock-preview-thumb',
-            layout_manager: new Clutter.BinLayout(),
-            x_expand: true,
-        });
-        thumbnail.set_size(PREVIEW_WIDTH, PREVIEW_HEIGHT);
-        const windowActor = metaWindow.get_compositor_private();
-        if (windowActor) {
-            const [sourceWidth, sourceHeight] = windowActor.get_size();
-            const width = Math.max(1, sourceWidth);
-            const height = Math.max(1, sourceHeight);
-            const scale = Math.min(PREVIEW_WIDTH / width, PREVIEW_HEIGHT / height, 1);
-            thumbnail.add_child(new Clutter.Clone({
-                source: windowActor,
-                reactive: false,
-                width: Math.floor(width * scale),
-                height: Math.floor(height * scale),
-                x_align: Clutter.ActorAlign.CENTER,
-                y_align: Clutter.ActorAlign.CENTER,
-            }));
-        } else {
-            let icon = null;
-            if (typeof app.create_icon_texture === 'function')
-                icon = app.create_icon_texture(72);
-            if (!icon)
-                icon = new St.Icon({ icon_name: 'application-x-executable-symbolic', icon_size: 72 });
-            icon.x_align = Clutter.ActorAlign.CENTER;
-            icon.y_align = Clutter.ActorAlign.CENTER;
-            thumbnail.add_child(icon);
-        }
-        return thumbnail;
-    }
-
-    _positionNearSource() {
-        if (!this._sourceActor)
-            return;
-        const monitor = Main.layoutManager.findMonitorForActor(this._sourceActor) ||
-            Main.layoutManager.primaryMonitor;
-        if (!monitor)
-            return;
-        const [sourceX, sourceY] = this._sourceActor.get_transformed_position();
-        const [sourceWidth, sourceHeight] = this._sourceActor.get_transformed_size();
-        const [, , popupWidth, popupHeight] = this.actor.get_preferred_size();
-        const sourceCenterX = sourceX + sourceWidth / 2;
-        const sourceCenterY = sourceY + sourceHeight / 2;
-        const side = this._guessDockSide(monitor, sourceCenterX, sourceCenterY);
-        let x = sourceX + (sourceWidth - popupWidth) / 2;
-        let y = sourceY - popupHeight - POPUP_GAP;
-        if (side === St.Side.LEFT) {
-            x = sourceX + sourceWidth + POPUP_GAP;
-            y = sourceY + (sourceHeight - popupHeight) / 2;
-        } else if (side === St.Side.RIGHT) {
-            x = sourceX - popupWidth - POPUP_GAP;
-            y = sourceY + (sourceHeight - popupHeight) / 2;
-        } else if (side === St.Side.TOP) {
-            x = sourceX + (sourceWidth - popupWidth) / 2;
-            y = sourceY + sourceHeight + POPUP_GAP;
-        }
-        x = clamp(x, monitor.x + POPUP_MARGIN, monitor.x + monitor.width - popupWidth - POPUP_MARGIN);
-        y = clamp(y, monitor.y + POPUP_MARGIN, monitor.y + monitor.height - popupHeight - POPUP_MARGIN);
-        this.actor.set_position(Math.round(x), Math.round(y));
-    }
-
-    _guessDockSide(monitor, centerX, centerY) {
-        const distances = [
-            [St.Side.LEFT, Math.abs(centerX - monitor.x)],
-            [St.Side.RIGHT, Math.abs(centerX - (monitor.x + monitor.width))],
-            [St.Side.TOP, Math.abs(centerY - monitor.y)],
-            [St.Side.BOTTOM, Math.abs(centerY - (monitor.y + monitor.height))],
-        ];
-        distances.sort((left, right) => left[1] - right[1]);
-        return distances[0][0];
-    }
-}
-
-class DockHoverTracker {
-    constructor() {
-        this._popup = new WindowPreviewPopup();
-        this._hoveredIcon = null;
-        this._hoveredIconActor = null;
-        this._pollId = 0;
-        this._showTimeoutId = 0;
-        this._hideTimeoutId = 0;
-    }
-
-    enable() {
-        this._pollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, POINTER_POLL_MS, () => {
-            this._pollPointer();
-            return GLib.SOURCE_CONTINUE;
-        });
-    }
-
-    destroy() {
-        this._cancelShow();
-        this._cancelHide();
-        if (this._pollId) {
-            GLib.source_remove(this._pollId);
-            this._pollId = 0;
-        }
-        this._popup.destroy();
-        this._popup = null;
-    }
-
-    _pollPointer() {
-        const actor = this._getPointerActor();
-        const hoveredIcon = this._findDockIcon(actor);
-        const pointerInPopup = this._popup.containsActor(actor);
-        if (hoveredIcon) {
-            const iconChanged = hoveredIcon.icon !== this._hoveredIcon ||
-                hoveredIcon.actor !== this._hoveredIconActor;
-            this._hoveredIcon = hoveredIcon.icon;
-            this._hoveredIconActor = hoveredIcon.actor;
-            this._cancelHide();
-            if (iconChanged)
-                this._scheduleShow(hoveredIcon.icon, hoveredIcon.actor);
-            return;
-        }
-        this._hoveredIcon = null;
-        this._hoveredIconActor = null;
-        this._cancelShow();
-        if (pointerInPopup)
-            this._cancelHide();
-        else
-            this._scheduleHide();
-    }
-
-    _getPointerActor() {
-        const [x, y] = global.get_pointer();
-        return global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y);
-    }
-
-    _findDockIcon(actor) {
-        for (let current = actor; current; current = current.get_parent()) {
-            const delegate = current._delegate;
-            if (!this._isDockAppIcon(delegate))
-                continue;
-            if (!delegate.app || !this._isInsideDash(current))
-                continue;
-            return { icon: delegate, actor: this._getIconActor(delegate, current) };
-        }
-        return null;
-    }
-
-    _isDockAppIcon(delegate) {
-        return !!delegate && !!delegate.app &&
-            (typeof delegate.getInterestingWindows === 'function' ||
-                typeof delegate.app.get_windows === 'function');
-    }
-
-    _isInsideDash(actor) {
-        for (let current = actor; current; current = current.get_parent()) {
-            if (hasStyleClass(current, 'dash-item-container') ||
-                hasStyleClass(current, 'dash-item') ||
-                hasStyleClass(current, 'dash'))
-                return true;
-        }
-        return false;
-    }
-
-    _getIconActor(icon, fallbackActor) {
-        if (icon instanceof Clutter.Actor)
-            return icon;
-        if (icon.actor instanceof Clutter.Actor)
-            return icon.actor;
-        return fallbackActor;
-    }
-
-    _scheduleShow(icon, actor) {
-        this._cancelShow();
-        this._cancelHide();
-        this._showTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOVER_DELAY_MS, () => {
-            this._showTimeoutId = 0;
-            if (this._hoveredIcon !== icon || this._hoveredIconActor !== actor)
-                return GLib.SOURCE_REMOVE;
-            const windows = this._getAppWindows(icon);
-            if (windows.length === 0) {
-                this._popup.hide();
-                return GLib.SOURCE_REMOVE;
-            }
-            this._popup.show(icon.app, windows, actor);
-            return GLib.SOURCE_REMOVE;
-        });
-    }
-
-    _scheduleHide() {
-        if (this._hideTimeoutId || !this._popup.visible)
-            return;
-        this._hideTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HIDE_DELAY_MS, () => {
-            this._hideTimeoutId = 0;
-            this._popup.hide();
-            return GLib.SOURCE_REMOVE;
-        });
-    }
-
-    _cancelShow() {
-        if (this._showTimeoutId) {
-            GLib.source_remove(this._showTimeoutId);
-            this._showTimeoutId = 0;
-        }
-    }
-
-    _cancelHide() {
-        if (this._hideTimeoutId) {
-            GLib.source_remove(this._hideTimeoutId);
-            this._hideTimeoutId = 0;
-        }
-    }
-
-    _getAppWindows(icon) {
-        let windows = [];
-        if (typeof icon.getInterestingWindows === 'function')
-            windows = icon.getInterestingWindows();
-        if (windows.length === 0 && icon.app && typeof icon.app.get_windows === 'function')
-            windows = icon.app.get_windows();
-        return getVisibleAppWindows({ get_windows: () => windows });
-    }
-}
-
-let tracker = null;
-
-function init() {
-}
-
-function enable() {
-    if (tracker)
-        return;
-    tracker = new DockHoverTracker();
-    tracker.enable();
-}
-
-function disable() {
-    if (!tracker)
-        return;
-    tracker.destroy();
-    tracker = null;
-}
-"""
 
 
-EXTENSION_CSS = """.dock-preview-popup {
-    background-color: rgba(28, 28, 32, 0.96);
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    border-radius: 10px;
-    padding: 10px;
-    spacing: 8px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38);
-}
-
-.dock-preview-header {
-    color: #ffffff;
-    font-weight: 700;
-    font-size: 12px;
-    padding: 0 2px 2px;
-}
-
-.dock-preview-items {
-    spacing: 8px;
-}
-
-.dock-preview-item {
-    background-color: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 8px;
-    padding: 7px;
-}
-
-.dock-preview-item:hover {
-    background-color: rgba(74, 144, 226, 0.28);
-    border-color: rgba(132, 185, 255, 0.8);
-}
-
-.dock-preview-thumb {
-    background-color: rgba(0, 0, 0, 0.28);
-    border-radius: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.dock-preview-title {
-    color: #eeeeee;
-    font-size: 12px;
-    padding-top: 6px;
-}
-"""
 
 
 def run(command, check=True):
@@ -1098,42 +550,16 @@ class MaccelPermissionService:
         steps += self.addCurrentUserToMaccelGroup()
         steps += self.reloadUdevRules()
         steps += self.reloadMaccelModule()
-        body = "\n".join(steps)
         user = self.username or "$SUDO_USER"
         MOUSE_PERMISSION_FIXER.write_text(
-            f"""#!/usr/bin/env bash
-set -uo pipefail
-
-log_path="{MOUSE_INSTALL_LOG}"
-mkdir -p "$(dirname "$log_path")"
-exec >>"$log_path" 2>&1
-
-echo "==== maccel permission fix started $(date -Is) ===="
-
-echo "Creating maccel group if needed..."
-{steps[0]}
-
-echo "Adding user to maccel group..."
-{(steps[1] if len(self.addCurrentUserToMaccelGroup()) else 'true')}
-
-echo "Reloading udev rules..."
-udevadm control --reload-rules
-udevadm trigger
-
-echo "Reloading maccel module..."
-modprobe -r maccel || true
-modprobe maccel
-
-echo "Rechecking write permission..."
-ls -l "{SENS_MULT_PATH}" || true
-if [ -w "{SENS_MULT_PATH}" ]; then
-  echo "maccel permission fix: SENS_MULT writable"
-else
-  echo "maccel permission fix: SENS_MULT still not writable in fix process"
-fi
-echo "Groups for {user}: $(id -nG "{user}" 2>/dev/null || true)"
-echo "==== maccel permission fix finished $(date -Is) ===="
-""",
+            load_template(
+                "scripts/fix-maccel-permission.sh.tmpl",
+                MOUSE_INSTALL_LOG=MOUSE_INSTALL_LOG,
+                CREATE_GROUP_STEP=steps[0],
+                ADD_USER_STEP=steps[1] if len(self.addCurrentUserToMaccelGroup()) else "true",
+                SENS_MULT_PATH=SENS_MULT_PATH,
+                USER=user,
+            ),
             encoding="utf-8",
         )
         MOUSE_PERMISSION_FIXER.chmod(
@@ -1312,75 +738,16 @@ class MouseMovementService:
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         MOUSE_APPLY_ON_LOGIN.write_text(
-            f"""#!/usr/bin/env bash
-set -u
-
-log_path="{MOUSE_COMMAND_LOG}"
-mkdir -p "$(dirname "$log_path")"
-echo "$(date -Is) reapply mouse preset at login" >>"$log_path"
-
-if ! command -v maccel >/dev/null 2>&1; then
-  echo "$(date -Is) maccel CLI not found" >>"$log_path"
-  exit 0
-fi
-
-preset="$(python3 - <<'PY' 2>/dev/null
-import json
-from pathlib import Path
-path = Path("{CONFIG_PATH}")
-try:
-    data = json.loads(path.read_text())
-except Exception:
-    data = {{}}
-print(data.get("mouseMovement", {{}}).get("activePreset", "unknown"))
-PY
-)"
-custom_sens="$(python3 - <<'PY' 2>/dev/null
-import json
-from pathlib import Path
-path = Path("{CONFIG_PATH}")
-try:
-    data = json.loads(path.read_text())
-except Exception:
-    data = {{}}
-value = data.get("mouseMovement", {{}}).get("customSensMult", "")
-print(value)
-PY
-)"
-
-case "$preset" in
-  windows)
-    maccel set all common 1.0 1.0 1000.0 0.0 >>"$log_path" 2>&1 || exit 0
-    maccel set all linear 0.055 1.5 2.8 >>"$log_path" 2>&1 || exit 0
-    maccel set mode linear >>"$log_path" 2>&1 || exit 0
-    ;;
-  macos)
-    maccel set all common 1.0 1.0 1000.0 0.0 >>"$log_path" 2>&1 || exit 0
-    maccel set all natural 0.1 1.0 1.65 >>"$log_path" 2>&1 || exit 0
-    maccel set mode natural >>"$log_path" 2>&1 || exit 0
-    ;;
-  custom)
-    if [ -n "$custom_sens" ]; then
-      maccel set param sens-mult "$custom_sens" >>"$log_path" 2>&1 || exit 0
-    fi
-    ;;
-esac
-
-echo "$(date -Is) mouse preset reapplied: $preset" >>"$log_path"
-""",
+            load_template(
+                "scripts/apply-mouse.sh.tmpl",
+                MOUSE_COMMAND_LOG=MOUSE_COMMAND_LOG,
+                CONFIG_PATH=CONFIG_PATH,
+            ),
             encoding="utf-8",
         )
         MOUSE_APPLY_ON_LOGIN.chmod(0o755)
         MOUSE_AUTOSTART.write_text(
-            f"""[Desktop Entry]
-Type=Application
-Name=Linux Toolbox Mouse Movement
-Comment=Reapply the saved Linux Toolbox mouse preset
-Exec={MOUSE_APPLY_ON_LOGIN}
-Terminal=false
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=4
-""",
+            load_template("desktop/mouse-autostart.desktop.tmpl", MOUSE_APPLY_ON_LOGIN=MOUSE_APPLY_ON_LOGIN),
             encoding="utf-8",
         )
 
@@ -1408,474 +775,263 @@ X-GNOME-Autostart-Delay=4
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         MOUSE_INSTALLER.write_text(
-            f"""#!/usr/bin/env bash
-set -euo pipefail
-
-log_path="{MOUSE_INSTALL_LOG}"
-mkdir -p "$(dirname "$log_path")"
-: >"$log_path"
-exec >>"$log_path" 2>&1
-
-echo "==== maccel install started $(date -Is) ===="
-export DEBIAN_FRONTEND=noninteractive
-
-kernel_compiler="$(grep -o 'gcc-[0-9]\\+' /proc/version | head -n 1 || true)"
-compiler_package=""
-if [ -n "$kernel_compiler" ]; then
-  compiler_package="$kernel_compiler"
-fi
-
-detectMaccelVersion() {{
-  grep "pkgver=" /opt/maccel/PKGBUILD | grep -oP '\\d\\.\\d\\.\\d' | head -n 1
-}}
-
-detectLatestCliVersion() {{
-  curl -fsSL https://github.com/Gnarus-G/maccel/releases/latest 2>/dev/null \
-    | grep -oP 'v\\d+\\.\\d+\\.\\d+' \
-    | tail -n 1 \
-    | cut -c 2-
-}}
-
-findDkmsSourceDir() {{
-  local version="$1"
-  printf "/usr/src/maccel-%s" "$version"
-}}
-
-findProblematicEnumSyntax() {{
-  local source_dir="$1"
-  grep -R "enum accel_mode :" "$source_dir" 2>/dev/null || true
-}}
-
-applyEnumSyntaxPatch() {{
-  local source_dir="$1"
-  local matches
-  matches="$(findProblematicEnumSyntax "$source_dir")"
-  if [ -z "$matches" ]; then
-    echo "Patch enum_accel_mode_c_syntax: not needed"
-    return 0
-  fi
-
-  echo "Patch enum_accel_mode_c_syntax: needed"
-  while IFS= read -r file; do
-    file="${{file%%:*}}"
-    if [ -n "$file" ] && [ -f "$file" ]; then
-      sed -i 's/enum accel_mode : unsigned char/enum accel_mode/g' "$file"
-    fi
-  done <<EOF_PATCH_MATCHES
-$matches
-EOF_PATCH_MATCHES
-  echo "Patch enum_accel_mode_c_syntax: applied"
-}}
-
-verifyEnumSyntaxPatch() {{
-  local source_dir="$1"
-  if findProblematicEnumSyntax "$source_dir" | grep -q "enum accel_mode :"; then
-    echo "Patch enum_accel_mode_c_syntax: failed verification"
-    return 1
-  fi
-  echo "Patch enum_accel_mode_c_syntax: verified"
-  return 0
-}}
-
-applyCompilerPatchIfNeeded() {{
-  local source_dir="$1"
-  local version="$2"
-  if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
-    echo "Patch compiler_path: using $kernel_compiler"
-    cat > "$source_dir/dkms.conf" <<EOF_DKMS_CONFIG
-PACKAGE_NAME="maccel"
-PACKAGE_VERSION="$version"
-MAKE[0]="make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=''"
-BUILT_MODULE_NAME[0]="maccel"
-DEST_MODULE_LOCATION[0]="/kernel/drivers/usb"
-AUTOINSTALL="yes"
-EOF_DKMS_CONFIG
-    patchCompilerHardcodes "$source_dir"
-    if [ -d /opt/maccel ]; then
-      patchCompilerHardcodes /opt/maccel
-    fi
-    export CC="$kernel_compiler"
-  else
-    echo "Patch compiler_path: not needed"
-  fi
-}}
-
-patchCompilerHardcodes() {{
-  local patch_dir="$1"
-  echo "Searching exact compiler assignments in $patch_dir"
-  grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" "$patch_dir" 2>/dev/null || true
-  while IFS= read -r file; do
-    [ -n "$file" ] || continue
-    sed -i "s/^[[:space:]]*CC=gcc[[:space:]]*$/CC ?= gcc/" "$file"
-  done <<EOF_COMPILER_PATCH_FILES
-$(grep -RIl "^[[:space:]]*CC=gcc[[:space:]]*$" "$patch_dir" 2>/dev/null || true)
-EOF_COMPILER_PATCH_FILES
-}}
-
-verifyCompilerPatch() {{
-  local source_dir="$1"
-  if [ -z "$kernel_compiler" ] || ! command -v "$kernel_compiler" >/dev/null 2>&1; then
-    echo "Patch compiler_path: verification skipped"
-    return 0
-  fi
-
-  echo "Final DKMS config:"
-  cat "$source_dir/dkms.conf"
-  echo "Final DKMS driver Makefile compiler lines:"
-  grep -RIn "CC[[:space:]]*[?]*=" "$source_dir" /opt/maccel 2>/dev/null || true
-
-  local hardcoded_matches
-  hardcoded_matches="$(grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" "$source_dir" 2>/dev/null || true)"
-  if [ -n "$hardcoded_matches" ]; then
-    echo "Compiler patch verification failed: DKMS source still contains CC=gcc"
-    echo "$hardcoded_matches"
-    return 1
-  fi
-  local opt_hardcoded_matches
-  opt_hardcoded_matches="$(grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" /opt/maccel 2>/dev/null || true)"
-  if [ -n "$opt_hardcoded_matches" ]; then
-    echo "Compiler patch verification failed: /opt/maccel still contains CC=gcc"
-    echo "$opt_hardcoded_matches"
-    return 1
-  fi
-
-  if ! grep -q "CC=$kernel_compiler" "$source_dir/dkms.conf"; then
-    echo "Compiler patch verification failed: DKMS config missing CC=$kernel_compiler"
-    return 1
-  fi
-  if ! grep -RIn "^[[:space:]]*CC ?= gcc[[:space:]]*$" "$source_dir" 2>/dev/null | grep -q "Makefile:"; then
-    echo "Compiler patch verification failed: DKMS Makefile missing CC ?= gcc"
-    return 1
-  fi
-  if ! grep -RIn "^[[:space:]]*CC ?= gcc[[:space:]]*$" /opt/maccel 2>/dev/null | grep -q "/driver/Makefile:"; then
-    echo "Compiler patch verification failed: /opt/maccel driver/Makefile missing CC ?= gcc"
-    return 1
-  fi
-
-  echo "Patch compiler_path: verified no exact CC=gcc assignments remain"
-}}
-
-applyDkmsConfigPatchIfNeeded() {{
-  local source_dir="$1"
-  if grep -q "@_PKGNAME@\\|@PKGVER@" "$source_dir/dkms.conf"; then
-    echo "Patch dkms_config_template: failed"
-    return 1
-  fi
-  if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
-    if ! grep -q "CC=$kernel_compiler" "$source_dir/dkms.conf"; then
-      echo "Patch dkms_config_template: failed missing CC=$kernel_compiler"
-      return 1
-    fi
-  fi
-  echo "Patch dkms_config_template: verified"
-}}
-
-applyPatchesIfNeeded() {{
-  local source_dir="$1"
-  local version="$2"
-  enum_needed=false
-  enum_applied=false
-  enum_verified=false
-  if [ -n "$(findProblematicEnumSyntax "$source_dir")" ]; then
-    enum_needed=true
-  fi
-  applyEnumSyntaxPatch "$source_dir"
-  if [ "$enum_needed" = true ]; then
-    enum_applied=true
-  fi
-  verifyEnumSyntaxPatch "$source_dir"
-  enum_verified=true
-
-  echo "{{"
-  echo "  \\"maccelVersion\\": \\"$version\\","
-  echo "  \\"sourceDir\\": \\"$source_dir\\","
-  echo "  \\"patches\\": ["
-  echo "    {{\\"name\\": \\"enum_accel_mode_c_syntax\\", \\"needed\\": $enum_needed, \\"applied\\": $enum_applied, \\"verified\\": $enum_verified}}"
-  echo "  ]"
-  echo "}}"
-
-  if [ -d /opt/maccel ]; then
-    applyEnumSyntaxPatch /opt/maccel
-    verifyEnumSyntaxPatch /opt/maccel
-  fi
-  applyCompilerPatchIfNeeded "$source_dir" "$version"
-  verifyCompilerPatch "$source_dir"
-  applyDkmsConfigPatchIfNeeded "$source_dir"
-}}
-
-showDkmsMakeLog() {{
-  local version="$1"
-  local make_log
-  make_log="$(findDkmsMakeLog "$version")"
-  if [ -f "$make_log" ]; then
-    echo "==== DKMS make.log: $make_log ===="
-    cat "$make_log"
-    first_error="$(grep -Ei "error:|fatal:|undefined reference|implicit declaration|No such file|bad exit status" "$make_log" | head -n 1 || true)"
-    if [ -n "$first_error" ]; then
-      echo "First build error: $first_error"
-    fi
-    echo "==== end DKMS make.log ===="
-  else
-    echo "DKMS make.log was not found at $make_log"
-  fi
-}}
-
-findDkmsMakeLog() {{
-  local version="$1"
-  local kernel
-  kernel="$(uname -r)"
-  local arch
-  arch="$(uname -m)"
-  for candidate in \
-    "/var/lib/dkms/maccel/$version/build/make.log" \
-    "/var/lib/dkms/maccel/$version/$kernel/$arch/log/make.log"; do
-    if [ -f "$candidate" ]; then
-      printf "%s" "$candidate"
-      return 0
-    fi
-  done
-  find "/var/lib/dkms/maccel/$version" -path "*/log/make.log" -type f 2>/dev/null | sort | tail -n 1
-}}
-
-checkSecureBootWarning() {{
-  if command -v mokutil >/dev/null 2>&1; then
-    sb_state="$(mokutil --sb-state 2>/dev/null || true)"
-    echo "Secure Boot state: $sb_state"
-    if printf "%s" "$sb_state" | grep -qi "enabled"; then
-      echo "WARNING: Secure Boot is enabled. The maccel kernel module may need signing before modprobe can load it."
-    fi
-  fi
-}}
-
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  packages=(curl git make dkms gcc sudo wget ca-certificates build-essential pkg-config libudev-dev "linux-headers-$(uname -r)")
-  if [ -n "$compiler_package" ]; then
-    packages+=("$compiler_package")
-  fi
-  apt-get install -y "${{packages[@]}}"
-else
-  echo "apt-get was not found. Install maccel dependencies manually for this distro."
-  exit 1
-fi
-
-workdir="$(mktemp -d)"
-trap 'rm -rf "$workdir"' EXIT
-
-buildMaccelCliFromSource() {{
-  echo "Building maccel CLI from source with rustup stable..."
-  cd /opt/maccel
-  export CARGO_HOME=/opt/maccel/.cargo
-  export RUSTUP_HOME=/opt/maccel/.rustup
-  export PATH="$CARGO_HOME/bin:$PATH"
-
-  if ! command -v rustup >/dev/null 2>&1; then
-    echo "Installing local rustup toolchain for maccel CLI build..."
-    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$workdir/rustup-init.sh"
-    sh "$workdir/rustup-init.sh" -y --profile minimal --default-toolchain stable --no-modify-path
-  fi
-
-  rustup default stable
-  echo "Rust compiler: $(rustc --version || true)"
-  echo "Cargo: $(cargo --version || true)"
-
-  cargo build --bin maccel --release
-  if [ ! -x target/release/maccel ]; then
-    echo "maccel install failed: cargo build completed but target/release/maccel is missing."
-    return 1
-  fi
-
-  install -m 755 -D target/release/maccel /opt/maccel/bin/maccel
-  /opt/maccel/bin/maccel -V
-}}
-
-installAttempt() {{
-  local attempt="$1"
-  echo "==== attempt $attempt/5 ===="
-  echo "Kernel: $(uname -r)"
-  echo "Default gcc: $(gcc --version | head -n 1 || true)"
-  echo "Kernel compiler: ${{kernel_compiler:-unknown}}"
-  selected_compiler="${{kernel_compiler:-gcc}}"
-  echo "Selected compiler: $selected_compiler"
-
-  cd /
-  rm -rf /opt/maccel
-  git clone --depth 1 https://github.com/Gnarus-G/maccel.git /opt/maccel
-  cd /opt/maccel
-
-  dkms_version="$(detectMaccelVersion)"
-  if [ -z "$dkms_version" ]; then
-    echo "maccel install failed: could not detect maccel version from /opt/maccel/PKGBUILD."
-    return 10
-  fi
-  dkms_source_dir="$(findDkmsSourceDir "$dkms_version")"
-  echo "maccel version: $dkms_version"
-  echo "DKMS source path: $dkms_source_dir"
-
-  echo "Preparing DKMS module maccel/$dkms_version..."
-  dkms remove -m maccel -v "$dkms_version" --all || true
-  rm -rf "$dkms_source_dir"
-  install -Dm 644 dkms.conf "$dkms_source_dir/dkms.conf"
-  sed -e "s/@_PKGNAME@/maccel/" \
-      -e "s/@PKGVER@/$dkms_version/" \
-      -e "s/@DRIVER_CFLAGS@/''/" \
-      -i "$dkms_source_dir/dkms.conf"
-  cp -r driver/. "$dkms_source_dir/"
-
-  echo "Installing udev rules..."
-  make udev_uninstall || true
-  make udev_install
-
-  echo "Applying compatibility patches..."
-  if ! applyPatchesIfNeeded "$dkms_source_dir" "$dkms_version"; then
-    echo "maccel install failed: compatibility patch verification failed."
-    return 11
-  fi
-
-  echo "Building and installing DKMS module..."
-  if ! dkms add -m maccel -v "$dkms_version"; then
-    showDkmsMakeLog "$dkms_version"
-    return 20
-  fi
-  if ! dkms build -m maccel -v "$dkms_version" -k "$(uname -r)"; then
-    showDkmsMakeLog "$dkms_version"
-    return 20
-  fi
-  showDkmsMakeLog "$dkms_version"
-  make_log="$(findDkmsMakeLog "$dkms_version")"
-  if [ -f "$make_log" ]; then
-    if grep -q "make CC=gcc " "$make_log"; then
-      echo "maccel install failed: DKMS make.log still shows make CC=gcc."
-      return 22
-    fi
-    if ! grep -q "CC=gcc-12\\|gcc-12" "$make_log"; then
-      echo "maccel install failed: DKMS make.log does not show gcc-12."
-      return 23
-    fi
-  else
-    echo "maccel install failed: DKMS make.log missing immediately after build."
-    return 23
-  fi
-  if ! dkms install --force -m maccel -v "$dkms_version" -k "$(uname -r)"; then
-    showDkmsMakeLog "$dkms_version"
-    return 20
-  fi
-
-  echo "DKMS status:"
-  dkms status maccel || true
-  if ! dkms status maccel | grep -q "maccel/$dkms_version.*$(uname -r).*installed"; then
-    echo "maccel install failed: DKMS status does not show installed for $(uname -r)."
-    return 21
-  fi
-
-  if ! modprobe maccel; then
-    echo "modprobe maccel failed."
-    checkSecureBootWarning
-    dmesg | tail -100 || true
-    if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi enabled; then
-      echo "maccel built but module loading blocked, likely Secure Boot"
-      return 30
-    fi
-    echo "maccel install failed: modprobe maccel failed."
-    return 24
-  fi
-
-  if ! lsmod | grep -q "^maccel"; then
-    echo "maccel install failed: module loaded command succeeded but lsmod does not show maccel."
-    return 25
-  fi
-
-  echo "Installing maccel CLI..."
-  mkdir -p /opt/maccel/bin
-  cli_version="$(detectLatestCliVersion || true)"
-  if [ -z "$cli_version" ]; then
-    cli_version="$dkms_version"
-  fi
-  echo "maccel CLI version: $cli_version"
-  if curl -fsSL "https://github.com/Gnarus-G/maccel/releases/download/v$cli_version/maccel-cli.tar.gz" -o "$workdir/maccel-cli.tar.gz"; then
-    tar -zxvf "$workdir/maccel-cli.tar.gz" -C "$workdir"
-    install -m 755 -D "$workdir/maccel_v$cli_version/maccel" /opt/maccel/bin/maccel
-  fi
-
-  if [ ! -x /opt/maccel/bin/maccel ] || ! /opt/maccel/bin/maccel -V >/dev/null 2>&1; then
-    echo "Downloaded maccel CLI is missing or incompatible; building CLI from source."
-    /opt/maccel/bin/maccel -V || true
-    rm -f /opt/maccel/bin/maccel
-    if ! buildMaccelCliFromSource; then
-      echo "maccel install failed: could not build a compatible maccel CLI from source."
-      return 26
-    fi
-  fi
-
-  if ! /opt/maccel/bin/maccel -V; then
-    echo "maccel install failed: installed maccel CLI cannot run."
-    return 26
-  fi
-  ln -sf /opt/maccel/bin/maccel /usr/local/bin/maccel
-
-  groupadd -f maccel
-  if [ -n "${{PKEXEC_UID:-}}" ]; then
-    target_user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1 || true)"
-    if [ -n "$target_user" ]; then
-      usermod -aG maccel "$target_user" || true
-    fi
-  fi
-
-  echo "maccel installed and loaded successfully"
-  return 0
-}}
-
-previous_error=""
-repeat_count=0
-final_status=1
-for attempt in 1 2 3 4 5; do
-  set +e
-  installAttempt "$attempt"
-  final_status=$?
-  set -e
-  if [ "$final_status" -eq 0 ] || [ "$final_status" -eq 30 ]; then
-    break
-  fi
-
-  dkms_version="$(detectMaccelVersion || true)"
-  make_log="/var/lib/dkms/maccel/$dkms_version/build/make.log"
-  current_error=""
-  if [ -f "$make_log" ]; then
-    current_error="$(grep -Ei "error:|fatal:|undefined reference|implicit declaration|No such file|bad exit status|make CC=gcc" "$make_log" | head -n 1 || true)"
-  fi
-  if [ -n "$current_error" ]; then
-    echo "Detected root error: $current_error"
-    if [ "$current_error" = "$previous_error" ]; then
-      repeat_count=$((repeat_count + 1))
-    else
-      repeat_count=1
-      previous_error="$current_error"
-    fi
-    if [ "$repeat_count" -ge 2 ] && printf "%s" "$current_error" | grep -q "ftrivial-auto-var-init\\|make CC=gcc"; then
-      echo "maccel install failed: same compiler error repeated after compiler patch verification."
-      break
-    fi
-  fi
-
-  echo "Retrying maccel install after failed attempt $attempt..."
-done
-
-if [ "$final_status" -eq 0 ]; then
-  echo "==== maccel install finished $(date -Is) ===="
-  exit 0
-fi
-if [ "$final_status" -eq 30 ]; then
-  echo "==== maccel install finished with module loading blocker $(date -Is) ===="
-  exit 30
-fi
-echo "maccel install failed: installer exhausted retry policy or hit a concrete root cause."
-echo "==== maccel install failed $(date -Is) ===="
-exit "$final_status"
-""",
+            load_template("scripts/install-maccel.sh.tmpl", MOUSE_INSTALL_LOG=MOUSE_INSTALL_LOG),
             encoding="utf-8",
         )
         MOUSE_INSTALLER.chmod(0o755)
         return MOUSE_INSTALLER
+
+
+class VietnameseInputService:
+    def __init__(self, logger=None):
+        self.logger = logger or (lambda _message: None)
+
+    def _log(self, message):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with VIETNAMESE_INPUT_LOG.open("a", encoding="utf-8") as handle:
+                handle.write(f"{iso_now()} {message}\n")
+        except Exception:
+            pass
+        self.logger(message)
+
+    def diagnostics(self):
+        raw_sources = self.current_input_sources_raw()
+        parsed_sources = self.parse_input_sources(raw_sources)
+        return {
+            "os": self.detect_os(),
+            "desktop": os.environ.get("XDG_CURRENT_DESKTOP", "unknown").strip() or "unknown",
+            "session": os.environ.get("XDG_SESSION_TYPE", "unknown").strip().lower() or "unknown",
+            "ibusInstalled": self.is_ibus_installed(),
+            "bambooInstalled": self.is_bamboo_installed(),
+            "ibusDaemonRunning": self.ibus_daemon_running(),
+            "framework": self.current_framework(),
+            "inputSourcesRaw": raw_sources,
+            "inputSources": parsed_sources,
+            "bambooSourceActive": self.has_bamboo_source(parsed_sources),
+            "bambooConfigPath": str(BAMBOO_CONFIG_PATH),
+            "bambooConfigExists": BAMBOO_CONFIG_PATH.exists(),
+            "bambooConfigDirExists": BAMBOO_CONFIG_DIR.exists(),
+            "pkexecAvailable": shutil.which("pkexec") is not None,
+            "aptBambooAvailable": self.apt_bamboo_available(),
+        }
+
+    def classify_status(self, diagnostics):
+        if not diagnostics["ibusInstalled"] or not diagnostics["bambooInstalled"]:
+            return "Needs install"
+        if self._saved_needs_logout():
+            return "Needs logout/login"
+        if not diagnostics["ibusDaemonRunning"]:
+            return "Needs restart"
+        if diagnostics["framework"] != "IBus" or not diagnostics["bambooSourceActive"]:
+            return "Misconfigured"
+        return "Ready"
+
+    def detect_os(self):
+        output = run(["lsb_release", "-ds"], check=False).strip()
+        if output:
+            return output.strip('"')
+        if Path("/etc/os-release").exists():
+            try:
+                for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+                    if line.startswith("PRETTY_NAME="):
+                        return line.split("=", 1)[1].strip().strip('"')
+            except Exception:
+                pass
+        return "Unknown"
+
+    def is_ibus_installed(self):
+        return shutil.which("ibus") is not None
+
+    def is_bamboo_installed(self):
+        output = run(["dpkg-query", "-W", "-f=${Status}", "ibus-bamboo"], check=False)
+        return "install ok installed" in output
+
+    def ibus_daemon_running(self):
+        return run(["pgrep", "-x", "ibus-daemon"], check=False).strip() != ""
+
+    def current_framework(self):
+        if shutil.which("im-config") is None:
+            return "Unknown"
+        output = run(["im-config", "-m"], check=False).lower()
+        if "ibus" in output:
+            return "IBus"
+        if "fcitx" in output:
+            return "Fcitx"
+        if output.strip():
+            return output.splitlines()[0].strip() or "Unknown"
+        return "Unknown"
+
+    def current_framework_id(self):
+        framework = self.current_framework()
+        if framework == "IBus":
+            return "ibus"
+        if framework == "Fcitx":
+            return "fcitx"
+        return ""
+
+    def apt_bamboo_available(self):
+        if shutil.which("apt-cache") is None:
+            return False
+        output = run(["apt-cache", "policy", "ibus-bamboo"], check=False)
+        for line in output.splitlines():
+            if line.strip().startswith("Candidate:"):
+                candidate = line.split(":", 1)[1].strip()
+                return bool(candidate and candidate != "(none)")
+        return False
+
+    def current_input_sources_raw(self):
+        return run(["gsettings", "get", GNOME_INPUT_SOURCES_SCHEMA, GNOME_INPUT_SOURCES_KEY], check=False)
+
+    @staticmethod
+    def parse_input_sources(raw):
+        try:
+            value = ast.literal_eval(raw)
+        except Exception:
+            return []
+        if not isinstance(value, list):
+            return []
+        sources = []
+        for item in value:
+            if (
+                isinstance(item, tuple)
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and isinstance(item[1], str)
+            ):
+                sources.append(item)
+        return sources
+
+    @staticmethod
+    def has_bamboo_source(sources):
+        return BAMBOO_INPUT_SOURCE in sources
+
+    @classmethod
+    def append_bamboo_source_value(cls, raw):
+        if not raw.strip():
+            raise RuntimeError("Could not read current GNOME input sources. No changes were made.")
+        sources = cls.parse_input_sources(raw)
+        if not sources and raw.strip() != "[]":
+            raise RuntimeError("Could not parse current GNOME input sources. No changes were made.")
+        if BAMBOO_INPUT_SOURCE not in sources:
+            sources.append(BAMBOO_INPUT_SOURCE)
+        return repr(sources)
+
+    def _write_installer_script(self, add_ppa=False):
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        VIETNAMESE_INSTALLER.write_text(
+            load_template(
+                "scripts/install-vietnamese-input.sh.tmpl",
+                VIETNAMESE_INPUT_LOG=VIETNAMESE_INPUT_LOG,
+                ADD_PPA="1" if add_ppa else "0",
+            ),
+            encoding="utf-8",
+        )
+        VIETNAMESE_INSTALLER.chmod(0o755)
+        return VIETNAMESE_INSTALLER
+
+    def start_install(self, add_ppa=False):
+        if shutil.which("pkexec") is None:
+            raise RuntimeError("pkexec is not installed. Cannot install Vietnamese input packages.")
+        installer = self._write_installer_script(add_ppa=add_ppa)
+        self._log("Installing packages...")
+        return subprocess.Popen(["pkexec", str(installer)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def apply_unikey_like_fixes(self):
+        self._log("Applying UniKey-like fixes...")
+        if not self.is_ibus_installed():
+            raise RuntimeError("IBus is not installed.")
+        if not self.is_bamboo_installed():
+            raise RuntimeError("ibus-bamboo is not installed.")
+
+        self._log("Backup saved...")
+        previous_sources = self.current_input_sources_raw()
+        previous_framework = self.current_framework_id()
+        bamboo_backup = self.backup_bamboo_config()
+
+        self._log("Checking input sources...")
+        new_sources = self.append_bamboo_source_value(previous_sources)
+
+        self._log("Setting IBus as input framework...")
+        if shutil.which("im-config"):
+            run(["im-config", "-n", "ibus"], check=False)
+
+        if new_sources != previous_sources:
+            run(["gsettings", "set", GNOME_INPUT_SOURCES_SCHEMA, GNOME_INPUT_SOURCES_KEY, new_sources])
+
+        self.save_previous_settings(previous_sources, previous_framework, bamboo_backup)
+        self.restart_input_method()
+        self._log("Open ibus-bamboo preferences and choose Telex + Unicode.")
+        self._log("Done / Needs logout")
+
+    def backup_bamboo_config(self):
+        if not BAMBOO_CONFIG_PATH.exists():
+            return ""
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(BAMBOO_CONFIG_PATH, BAMBOO_CONFIG_BACKUP_PATH)
+        return str(BAMBOO_CONFIG_BACKUP_PATH)
+
+    def save_previous_settings(self, previous_sources, previous_framework, bamboo_backup):
+        config = load_app_config()
+        config["vietnameseInput"] = {
+            "previousInputSources": previous_sources,
+            "previousInputMethod": previous_framework,
+            "previousBambooConfigBackupPath": bamboo_backup,
+            "lastAppliedAt": iso_now(),
+            "needsLogout": True,
+        }
+        save_app_config(config)
+
+    def restart_input_method(self):
+        self._log("Restarting IBus...")
+        if shutil.which("ibus") is None:
+            raise RuntimeError("IBus command was not found.")
+        completed = subprocess.run(["ibus", "restart"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if completed.returncode == 0:
+            return
+        run(["killall", "ibus-daemon"], check=False)
+        subprocess.Popen(["ibus-daemon", "-drx"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def restore_previous_settings(self):
+        state = load_app_config().get("vietnameseInput")
+        if not isinstance(state, dict):
+            raise RuntimeError("No Vietnamese input backup was found.")
+
+        previous_sources = state.get("previousInputSources")
+        if previous_sources:
+            run(["gsettings", "set", GNOME_INPUT_SOURCES_SCHEMA, GNOME_INPUT_SOURCES_KEY, previous_sources])
+
+        previous_method = state.get("previousInputMethod")
+        if previous_method and shutil.which("im-config"):
+            run(["im-config", "-n", previous_method], check=False)
+
+        backup_path = state.get("previousBambooConfigBackupPath")
+        if backup_path and Path(backup_path).exists():
+            BAMBOO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup_path, BAMBOO_CONFIG_PATH)
+
+        config = load_app_config()
+        current = config.get("vietnameseInput", {})
+        if isinstance(current, dict):
+            current["needsLogout"] = False
+            current["lastRestoredAt"] = iso_now()
+            config["vietnameseInput"] = current
+            save_app_config(config)
+        self.restart_input_method()
+
+    def _saved_needs_logout(self):
+        state = load_app_config().get("vietnameseInput")
+        return isinstance(state, dict) and bool(state.get("needsLogout"))
+
+    def latest_log_text(self, limit=220):
+        if not VIETNAMESE_INPUT_LOG.exists():
+            return ""
+        try:
+            lines = VIETNAMESE_INPUT_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception as error:
+            return f"Could not read Vietnamese input log: {error}"
+        return "\n".join(lines[-limit:])
 
 
 class App(Gtk.ApplicationWindow):
@@ -1890,10 +1046,13 @@ class App(Gtk.ApplicationWindow):
         self.syncing_features = False
         self.syncing_sidebar = False
         self.mouse_service = MouseMovementService()
+        self.vietnamese_service = VietnameseInputService(lambda message: self.log(message))
         self.mouse_install_process = None
         self.mouse_install_timer_id = None
         self.mouse_permission_fix_process = None
         self.mouse_permission_pending = None
+        self.vietnamese_install_process = None
+        self.vietnamese_install_timer_id = None
 
         root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         root.get_style_context().add_class("app-shell")
@@ -1931,12 +1090,14 @@ class App(Gtk.ApplicationWindow):
         chrome_scroller, chrome_tab = self.create_tab_page()
         mouse_scroller, mouse_tab = self.create_tab_page()
         clipboard_scroller, clipboard_tab = self.create_tab_page()
+        vietnamese_scroller, vietnamese_tab = self.create_tab_page()
         dock_scroller, dock_tab = self.create_tab_page()
 
         self.stack.add_titled(main_scroller, "overview", "Overview")
         self.stack.add_titled(chrome_scroller, "chrome", "Chrome Profiles")
         self.stack.add_titled(mouse_scroller, "mouse", "Mouse")
         self.stack.add_titled(clipboard_scroller, "clipboard", "Clipboard")
+        self.stack.add_titled(vietnamese_scroller, "vietnamese", "Vietnamese Input")
         self.stack.add_titled(dock_scroller, "dock", "Dock Style")
 
         for name, title, icon in (
@@ -1944,6 +1105,7 @@ class App(Gtk.ApplicationWindow):
             ("chrome", "Chrome Profiles", "web-browser-symbolic"),
             ("mouse", "Mouse", "input-mouse-symbolic"),
             ("clipboard", "Clipboard", "edit-paste-symbolic"),
+            ("vietnamese", "Vietnamese Input", "input-keyboard-symbolic"),
             ("dock", "Dock Style", "preferences-desktop-symbolic"),
         ):
             self.nav_list.add(self.create_nav_row(name, title, icon))
@@ -2226,11 +1388,121 @@ class App(Gtk.ApplicationWindow):
         self.clipboard_status_label.get_style_context().add_class("section-subtitle")
         clipboard_card.pack_start(self.clipboard_status_label, False, False, 0)
 
+        vietnamese_intro = Gtk.Label()
+        vietnamese_intro.set_markup("<span size='large'><b>Vietnamese Input</b></span>")
+        vietnamese_intro.set_xalign(0)
+        vietnamese_intro.set_line_wrap(True)
+        vietnamese_tab.pack_start(vietnamese_intro, False, False, 0)
+
+        vietnamese_description = Gtk.Label(
+            label="Set up Vietnamese typing to feel closer to Windows UniKey."
+        )
+        vietnamese_description.set_xalign(0)
+        vietnamese_description.set_line_wrap(True)
+        vietnamese_tab.pack_start(vietnamese_description, False, False, 0)
+
+        vietnamese_powered = Gtk.Label(label="UniKey-like Vietnamese Input - Powered by ibus-bamboo")
+        vietnamese_powered.set_xalign(0)
+        vietnamese_powered.get_style_context().add_class("section-subtitle")
+        vietnamese_tab.pack_start(vietnamese_powered, False, False, 0)
+
+        vietnamese_status_card = self.create_card("Status", "Current Vietnamese input setup.")
+        vietnamese_tab.pack_start(vietnamese_status_card, False, False, 0)
+
+        vietnamese_grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        vietnamese_status_card.pack_start(vietnamese_grid, False, False, 0)
+        self.vietnamese_status_pill = self.make_pill("Unknown", "warn")
+        self.vietnamese_ibus_pill = self.make_pill("Unknown", "warn")
+        self.vietnamese_bamboo_pill = self.make_pill("Unknown", "warn")
+        self.vietnamese_framework_pill = self.make_pill("Unknown", "warn")
+        self.vietnamese_session_pill = self.make_pill("Unknown", "warn")
+        self.vietnamese_source_pill = self.make_pill("Unknown", "warn")
+        self.vietnamese_mode_pill = self.make_pill("Telex", "ok")
+        for row_index, (label_text, pill) in enumerate(
+            (
+                ("Overall", self.vietnamese_status_pill),
+                ("IBus", self.vietnamese_ibus_pill),
+                ("ibus-bamboo", self.vietnamese_bamboo_pill),
+                ("Current input framework", self.vietnamese_framework_pill),
+                ("Current desktop session", self.vietnamese_session_pill),
+                ("Vietnamese input source", self.vietnamese_source_pill),
+                ("Recommended mode", self.vietnamese_mode_pill),
+            )
+        ):
+            label = Gtk.Label(label=label_text)
+            label.set_xalign(0)
+            vietnamese_grid.attach(label, 0, row_index, 1, 1)
+            vietnamese_grid.attach(pill, 1, row_index, 1, 1)
+
+        self.vietnamese_status_label = Gtk.Label()
+        self.vietnamese_status_label.set_xalign(0)
+        self.vietnamese_status_label.set_line_wrap(True)
+        vietnamese_status_card.pack_start(self.vietnamese_status_label, False, False, 0)
+
+        vietnamese_actions_card = self.create_card("Actions", "Install, fix, restart, or restore Vietnamese input.")
+        vietnamese_tab.pack_start(vietnamese_actions_card, False, False, 0)
+        vietnamese_actions = Gtk.Grid(column_spacing=10, row_spacing=10)
+        vietnamese_actions_card.pack_start(vietnamese_actions, False, False, 0)
+
+        self.vietnamese_check_button = self.create_primary_button("Check", "Run Vietnamese input diagnostics.")
+        self.vietnamese_check_button.connect("clicked", self.on_vietnamese_check)
+        vietnamese_actions.attach(self.vietnamese_check_button, 0, 0, 1, 1)
+
+        self.vietnamese_install_button = self.create_primary_button(
+            "Install UniKey-like Vietnamese Input",
+            "Install IBus and ibus-bamboo with authentication.",
+        )
+        self.vietnamese_install_button.connect("clicked", self.on_vietnamese_install)
+        vietnamese_actions.attach(self.vietnamese_install_button, 1, 0, 1, 1)
+
+        self.vietnamese_apply_button = self.create_primary_button(
+            "Apply UniKey-like Fixes",
+            "Set IBus, add Bamboo input source, back up settings, and restart IBus.",
+        )
+        self.vietnamese_apply_button.connect("clicked", self.on_vietnamese_apply_fixes)
+        vietnamese_actions.attach(self.vietnamese_apply_button, 0, 1, 1, 1)
+
+        self.vietnamese_restart_button = self.create_primary_button(
+            "Restart Input Method",
+            "Restart IBus, with a daemon fallback if needed.",
+        )
+        self.vietnamese_restart_button.connect("clicked", self.on_vietnamese_restart)
+        vietnamese_actions.attach(self.vietnamese_restart_button, 1, 1, 1, 1)
+
+        self.vietnamese_restore_button = Gtk.Button(label="Restore Previous Settings")
+        self.vietnamese_restore_button.set_tooltip_text("Restore Vietnamese input settings backed up before the last fix.")
+        self.vietnamese_restore_button.connect("clicked", self.on_vietnamese_restore)
+        vietnamese_actions.attach(self.vietnamese_restore_button, 0, 2, 2, 1)
+
+        self.vietnamese_install_progress = Gtk.ProgressBar()
+        self.vietnamese_install_progress.set_no_show_all(True)
+        vietnamese_actions_card.pack_start(self.vietnamese_install_progress, False, False, 0)
+
+        compatibility_card = self.create_card("Compatibility Fixes", "Safe recommendations for common app input issues.")
+        vietnamese_tab.pack_start(compatibility_card, False, False, 0)
+        self.vietnamese_compatibility_label = Gtk.Label()
+        self.vietnamese_compatibility_label.set_xalign(0)
+        self.vietnamese_compatibility_label.set_line_wrap(True)
+        compatibility_card.pack_start(self.vietnamese_compatibility_label, False, False, 0)
+
+        vietnamese_log_card = self.create_card("Live Log", "Vietnamese input check, install, and fix output.")
+        vietnamese_tab.pack_start(vietnamese_log_card, True, True, 0)
+        self.vietnamese_log_view = Gtk.TextView()
+        self.vietnamese_log_view.set_editable(False)
+        self.vietnamese_log_view.set_cursor_visible(False)
+        self.vietnamese_log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.vietnamese_log_view.set_monospace(True)
+        vietnamese_log_scroller = Gtk.ScrolledWindow()
+        vietnamese_log_scroller.set_min_content_height(180)
+        vietnamese_log_scroller.add(self.vietnamese_log_view)
+        vietnamese_log_card.pack_start(vietnamese_log_scroller, True, True, 0)
+
         self.refresh_compatibility()
         self.refresh_current_style()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_vietnamese_input_state()
         self.refresh_overview_summary()
         self.stack.set_visible_child_name("overview")
         self.nav_list.select_row(self.nav_list.get_row_at_index(0))
@@ -2239,7 +1511,7 @@ class App(Gtk.ApplicationWindow):
     def load_css(self):
         try:
             provider = Gtk.CssProvider()
-            provider.load_from_data(APP_CSS.encode("utf-8"))
+            provider.load_from_data(load_text("app.css").encode("utf-8"))
             screen = Gdk.Screen.get_default()
             if screen is not None:
                 Gtk.StyleContext.add_provider_for_screen(
@@ -2495,6 +1767,11 @@ class App(Gtk.ApplicationWindow):
         except Exception:
             clipboard_ready = False
         try:
+            vietnamese_diagnostics = self.vietnamese_service.diagnostics()
+            vietnamese_status = self.vietnamese_service.classify_status(vietnamese_diagnostics)
+        except Exception:
+            vietnamese_status = "Unknown"
+        try:
             style_action = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False).strip("'")
         except Exception:
             style_action = "unknown"
@@ -2507,11 +1784,116 @@ class App(Gtk.ApplicationWindow):
                 "ok" if mouse_installed and mouse_detected not in {"unknown", "default_ubuntu"} else ("warn" if mouse_installed else "err"),
             ),
             ("Clipboard: On" if clipboard_ready else "Clipboard: Off", "ok" if clipboard_ready else "warn"),
+            (
+                f"Vietnamese: {vietnamese_status}",
+                "ok" if vietnamese_status == "Ready" else ("err" if vietnamese_status == "Needs install" else "warn"),
+            ),
             (f"Dock: {style_action or 'unknown'}", "ok" if style_action else "warn"),
         ]
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
         self.overview_summary_box.show_all()
+
+    def refresh_vietnamese_input_state(self):
+        if not hasattr(self, "vietnamese_status_label"):
+            return
+        try:
+            diagnostics = self.vietnamese_service.diagnostics()
+            status = self.vietnamese_service.classify_status(diagnostics)
+        except Exception as error:
+            diagnostics = {}
+            status = "Unknown"
+            self.vietnamese_status_label.set_text(f"Could not check Vietnamese input: {error}")
+
+        install_running = self.vietnamese_install_process is not None and self.vietnamese_install_process.poll() is None
+        self.vietnamese_install_progress.set_visible(install_running)
+        if install_running:
+            self.vietnamese_install_progress.set_text("Installing Vietnamese input...")
+            self.vietnamese_install_progress.set_show_text(True)
+        else:
+            self.vietnamese_install_progress.set_fraction(0)
+            self.vietnamese_install_progress.set_show_text(False)
+
+        if diagnostics:
+            status_level = "ok" if status == "Ready" else ("err" if status == "Needs install" else "warn")
+            self.set_pill(self.vietnamese_status_pill, status, status_level)
+            self.set_pill(
+                self.vietnamese_ibus_pill,
+                "installed" if diagnostics["ibusInstalled"] else "missing",
+                "ok" if diagnostics["ibusInstalled"] else "err",
+            )
+            self.set_pill(
+                self.vietnamese_bamboo_pill,
+                "installed" if diagnostics["bambooInstalled"] else "missing",
+                "ok" if diagnostics["bambooInstalled"] else "err",
+            )
+            self.set_pill(
+                self.vietnamese_framework_pill,
+                diagnostics["framework"],
+                "ok" if diagnostics["framework"] == "IBus" else "warn",
+            )
+            session_label = {"x11": "Xorg", "wayland": "Wayland"}.get(diagnostics["session"], "Unknown")
+            self.set_pill(
+                self.vietnamese_session_pill,
+                session_label,
+                "ok" if diagnostics["session"] == "x11" else ("warn" if diagnostics["session"] == "wayland" else "err"),
+            )
+            self.set_pill(
+                self.vietnamese_source_pill,
+                "active" if diagnostics["bambooSourceActive"] else "missing",
+                "ok" if diagnostics["bambooSourceActive"] else "warn",
+            )
+            self.set_pill(self.vietnamese_mode_pill, "Telex", "ok")
+
+            lines = [
+                f"OS: {diagnostics['os']}",
+                f"Desktop: {diagnostics['desktop']}",
+                f"IBus daemon: {'running' if diagnostics['ibusDaemonRunning'] else 'not running'}",
+                f"Input sources: {diagnostics['inputSourcesRaw'] or 'unknown'}",
+                f"Bamboo config: {diagnostics['bambooConfigPath'] if diagnostics['bambooConfigExists'] else 'not found'}",
+            ]
+            if diagnostics["session"] == "wayland":
+                lines.append("Wayland warning: if Vietnamese input is unstable, try Xorg.")
+            if status == "Needs logout/login":
+                lines.append("You may need to log out and log back in for Vietnamese input to appear.")
+            if not diagnostics["bambooConfigExists"]:
+                lines.append("Open ibus-bamboo preferences and choose Telex + Unicode after install.")
+            self.vietnamese_status_label.set_text("\n".join(lines))
+
+            self.vietnamese_install_button.set_sensitive(
+                diagnostics["pkexecAvailable"] and not diagnostics["bambooInstalled"] and not install_running
+            )
+            self.vietnamese_apply_button.set_sensitive(
+                diagnostics["ibusInstalled"] and diagnostics["bambooInstalled"] and not install_running
+            )
+            self.vietnamese_restart_button.set_sensitive(diagnostics["ibusInstalled"] and not install_running)
+        else:
+            for pill in (
+                self.vietnamese_status_pill,
+                self.vietnamese_ibus_pill,
+                self.vietnamese_bamboo_pill,
+                self.vietnamese_framework_pill,
+                self.vietnamese_session_pill,
+                self.vietnamese_source_pill,
+            ):
+                self.set_pill(pill, "Unknown", "warn")
+
+        state = load_app_config().get("vietnameseInput")
+        self.vietnamese_restore_button.set_sensitive(isinstance(state, dict) and bool(state.get("previousInputSources")))
+        self.vietnamese_compatibility_label.set_text(
+            "\n".join(
+                [
+                    "Chrome / Electron apps: restart the app after changing input method.",
+                    "VSCode: restart VSCode if composing text behaves strangely.",
+                    "Terminal: restart IBus and reopen terminal tabs after install.",
+                    "JetBrains IDEs: restart the IDE after switching input method.",
+                    "Wayland session: try Xorg if input is unstable.",
+                    "After install: log out and log back in if Bamboo does not appear.",
+                ]
+            )
+        )
+        self.refresh_vietnamese_log_view()
+        self.refresh_overview_summary()
 
     def refresh_mouse_movement_state(self):
         env = self.mouse_service.getEnvironment()
@@ -2760,7 +2142,137 @@ class App(Gtk.ApplicationWindow):
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_vietnamese_input_state()
         self.refresh_overview_summary()
+
+    def on_vietnamese_check(self, _button):
+        self.log("Checking OS...")
+        self.log("Checking IBus...")
+        self.log("Checking ibus-bamboo...")
+        self.log("Checking input sources...")
+        self.refresh_vietnamese_input_state()
+        try:
+            diagnostics = self.vietnamese_service.diagnostics()
+            status = self.vietnamese_service.classify_status(diagnostics)
+            self.log(f"Vietnamese input check: {status}.")
+        except Exception as error:
+            self.log(f"Vietnamese input check failed: {error}")
+
+    def show_vietnamese_ppa_dialog(self):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text="ibus-bamboo is not available from your current apt sources.",
+        )
+        dialog.format_secondary_text("Add the official ibus-bamboo PPA?")
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        add_button = dialog.add_button("Add PPA", Gtk.ResponseType.OK)
+        add_button.get_style_context().add_class("suggested-action")
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.OK
+
+    def on_vietnamese_install(self, _button):
+        try:
+            diagnostics = self.vietnamese_service.diagnostics()
+            if not diagnostics["pkexecAvailable"]:
+                self.log("pkexec is missing, cannot install Vietnamese input packages.")
+                return
+            add_ppa = False
+            if not diagnostics["bambooInstalled"] and not diagnostics["aptBambooAvailable"]:
+                add_ppa = self.show_vietnamese_ppa_dialog()
+                if not add_ppa:
+                    self.log("Vietnamese input install cancelled. PPA was not added.")
+                    return
+            self.vietnamese_install_button.set_sensitive(False)
+            self.log("Installing UniKey-like Vietnamese Input. Ubuntu may ask for your password.")
+            self.vietnamese_install_process = self.vietnamese_service.start_install(add_ppa=add_ppa)
+            GLib.child_watch_add(self.vietnamese_install_process.pid, self.on_vietnamese_install_finished)
+            if self.vietnamese_install_timer_id is None:
+                self.vietnamese_install_timer_id = GLib.timeout_add(700, self.pulse_vietnamese_install_progress)
+        except Exception as error:
+            self.log(f"Failed to install Vietnamese input: {error}")
+            self.vietnamese_install_process = None
+        self.refresh_vietnamese_input_state()
+
+    def pulse_vietnamese_install_progress(self):
+        if self.vietnamese_install_process is None or self.vietnamese_install_process.poll() is not None:
+            self.vietnamese_install_timer_id = None
+            return False
+        self.vietnamese_install_progress.pulse()
+        self.refresh_vietnamese_log_view()
+        return True
+
+    def on_vietnamese_install_finished(self, _pid, status):
+        exit_code = status >> 8
+        if self.vietnamese_install_process is not None:
+            self.vietnamese_install_process.wait()
+        self.vietnamese_install_process = None
+        self.vietnamese_install_timer_id = None
+
+        if exit_code == 0:
+            self.log("Vietnamese input packages installed. Applying UniKey-like fixes...")
+            try:
+                self.vietnamese_service.apply_unikey_like_fixes()
+                self.log("You may need to log out and log back in for Vietnamese input to appear.")
+            except Exception as error:
+                self.log(f"Packages installed, but fixes failed: {error}")
+        elif exit_code == 42:
+            self.log("ibus-bamboo was not available from apt sources and PPA was not approved.")
+        else:
+            detail = self.latest_vietnamese_log_line()
+            message = "Vietnamese input install failed."
+            if detail:
+                message += f" Last log: {detail}"
+            message += f" Check {VIETNAMESE_INPUT_LOG}."
+            self.log(message)
+        self.refresh_vietnamese_input_state()
+
+    def on_vietnamese_apply_fixes(self, _button):
+        try:
+            self.vietnamese_service.apply_unikey_like_fixes()
+            self.log("UniKey-like Vietnamese Input fixes applied. Reopen apps if typing still behaves strangely.")
+        except Exception as error:
+            self.log(f"Failed to apply Vietnamese input fixes: {error}")
+        self.refresh_vietnamese_input_state()
+
+    def on_vietnamese_restart(self, _button):
+        try:
+            self.vietnamese_service.restart_input_method()
+            self.log("Input method restarted. Reopen apps if typing still behaves strangely.")
+        except Exception as error:
+            self.log(f"Failed to restart input method: {error}")
+        self.refresh_vietnamese_input_state()
+
+    def on_vietnamese_restore(self, _button):
+        try:
+            self.vietnamese_service.restore_previous_settings()
+            self.log("Previous Vietnamese input settings restored.")
+        except Exception as error:
+            self.log(f"Failed to restore Vietnamese input settings: {error}")
+        self.refresh_vietnamese_input_state()
+
+    def refresh_vietnamese_log_view(self):
+        if not hasattr(self, "vietnamese_log_view"):
+            return
+        text = self.vietnamese_service.latest_log_text()
+        buffer = self.vietnamese_log_view.get_buffer()
+        current = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        if current == text:
+            return
+        buffer.set_text(text)
+        mark = buffer.create_mark(None, buffer.get_end_iter(), False)
+        self.vietnamese_log_view.scroll_mark_onscreen(mark)
+
+    def latest_vietnamese_log_line(self):
+        text = self.vietnamese_service.latest_log_text()
+        for line in reversed(text.splitlines()):
+            line = line.strip()
+            if line:
+                return line[:180]
+        return ""
 
     def on_install_profiles(self, _button):
         try:
@@ -2903,6 +2415,7 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Mouse Movement startup check failed: {error}")
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
+        self.refresh_vietnamese_input_state()
         return False
 
     def on_mouse_windows(self, _button):
@@ -3175,7 +2688,7 @@ class App(Gtk.ApplicationWindow):
         ICON_DIR.mkdir(parents=True, exist_ok=True)
 
         wrapper_path = BIN_DIR / "chrome-profile-launch"
-        wrapper_path.write_text(WRAPPER, encoding="utf-8")
+        wrapper_path.write_text(load_text("scripts/chrome-profile-launch.sh"), encoding="utf-8")
         wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         for index, profile in enumerate(self.profiles):
@@ -3192,29 +2705,14 @@ class App(Gtk.ApplicationWindow):
             desktop_path = APP_DIR / desktop_id
             name = profile["name"].replace("\n", " ").strip()
             directory = profile["directory"]
-            desktop = f"""[Desktop Entry]
-Version=1.0
-Name=Chrome - {name}
-GenericName=Web Browser
-Comment=Open Chrome with the {name} profile
-Exec={wrapper_path} "{directory}" {class_name} --new-window %U
-Terminal=false
-Icon={icon_path if icon_path.exists() else browser_id}
-Type=Application
-Categories=Network;WebBrowser;
-MimeType=text/html;text/xml;application/xhtml+xml;application/xml;application/pdf;x-scheme-handler/http;x-scheme-handler/https;
-StartupNotify=true
-StartupWMClass={class_name}
-Actions=new-window;new-private-window;
-
-[Desktop Action new-window]
-Name=New Window
-Exec={wrapper_path} "{directory}" {class_name} --new-window
-
-[Desktop Action new-private-window]
-Name=New Incognito Window
-Exec={wrapper_path} "{directory}" {class_name} --incognito
-"""
+            desktop = load_template(
+                "desktop/chrome-profile.desktop.tmpl",
+                NAME=name,
+                WRAPPER_PATH=wrapper_path,
+                DIRECTORY=directory,
+                CLASS_NAME=class_name,
+                ICON=icon_path if icon_path.exists() else browser_id,
+            )
             desktop_path.write_text(desktop, encoding="utf-8")
 
         run(["update-desktop-database", str(APP_DIR)], check=False)
@@ -3261,16 +2759,9 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
 
     def install_hover_extension(self):
         EXT_DIR.mkdir(parents=True, exist_ok=True)
-        metadata = {
-            "description": "Preview open windows by hovering a dock icon and activate a window by selecting the preview.",
-            "name": "Dock Window Preview",
-            "shell-version": ["42"],
-            "uuid": "dock-window-preview@quivio",
-            "version": 42,
-        }
-        (EXT_DIR / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        (EXT_DIR / "extension.js").write_text(EXTENSION_JS, encoding="utf-8")
-        (EXT_DIR / "stylesheet.css").write_text(EXTENSION_CSS, encoding="utf-8")
+        (EXT_DIR / "metadata.json").write_text(load_text("hover-extension/metadata.json"), encoding="utf-8")
+        (EXT_DIR / "extension.js").write_text(load_text("hover-extension/extension.js"), encoding="utf-8")
+        (EXT_DIR / "stylesheet.css").write_text(load_text("hover-extension/stylesheet.css"), encoding="utf-8")
 
         raw = run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"], check=False)
         enabled = []
@@ -3298,63 +2789,13 @@ Exec={wrapper_path} "{directory}" {class_name} --incognito
         # Launcher used by autostart. CopyQ is single-instance, so this is safe
         # to run even if a server is already up. Runs the server in foreground so
         # the session tracks it as a live process (no broken `wait`).
-        COPYQ_START.write_text(
-            """#!/usr/bin/env bash
-set -u
-
-copyq config item_popup_interval 0 >/dev/null 2>&1 || true
-copyq config native_notifications false >/dev/null 2>&1 || true
-
-if pgrep -x copyq >/dev/null 2>&1; then
-  exit 0
-fi
-
-exec copyq
-""",
-            encoding="utf-8",
-        )
+        COPYQ_START.write_text(load_text("scripts/copyq-start.sh"), encoding="utf-8")
         COPYQ_START.chmod(0o755)
         # Super+V popup. Ensures the server is up, then toggles the history window.
-        COPYQ_SHORTCUT.write_text(
-            """#!/usr/bin/env bash
-set -u
-
-if ! pgrep -x copyq >/dev/null 2>&1; then
-  copyq >/dev/null 2>&1 &
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pgrep -x copyq >/dev/null 2>&1 && break
-    sleep 0.2
-  done
-fi
-
-copyq config item_popup_interval 0 >/dev/null 2>&1 || true
-exec copyq toggle
-""",
-            encoding="utf-8",
-        )
+        COPYQ_SHORTCUT.write_text(load_text("scripts/copyq-super-v.sh"), encoding="utf-8")
         COPYQ_SHORTCUT.chmod(0o755)
         # Clear history + the current system clipboard/selection.
-        COPYQ_CLEAR.write_text(
-            """#!/usr/bin/env bash
-set -u
-
-if ! pgrep -x copyq >/dev/null 2>&1; then
-  exit 0
-fi
-
-copyq eval -- '
-  var n = count();
-  if (n > 0) {
-    var rows = [];
-    for (var i = 0; i < n; ++i) rows.push(i);
-    remove.apply(this, rows);
-  }
-  copy("");
-  copySelection("");
-' >/dev/null 2>&1 || true
-""",
-            encoding="utf-8",
-        )
+        COPYQ_CLEAR.write_text(load_text("scripts/copyq-clear.sh"), encoding="utf-8")
         COPYQ_CLEAR.chmod(0o755)
 
     def reassign_gnome_super_v(self):
@@ -3379,15 +2820,7 @@ copyq eval -- '
         AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
         self._write_copyq_scripts()
         COPYQ_AUTOSTART.write_text(
-            f"""[Desktop Entry]
-Type=Application
-Name=CopyQ
-Comment=Clipboard manager
-Exec={COPYQ_START}
-Terminal=false
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=2
-""",
+            load_template("desktop/copyq.desktop.tmpl", COPYQ_START=COPYQ_START),
             encoding="utf-8",
         )
         COPYQ_AUTOSTART.chmod(0o644)
@@ -3546,16 +2979,19 @@ X-GNOME-Autostart-Delay=2
 
 class ChromeDockProfiles(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="local.chrome-dock-profiles")
+        super().__init__(application_id="local.linux_toolbox")
+        self.window = None
 
     def do_activate(self):
-        window = App(self)
-        window.show_all()
+        if self.window is None:
+            self.window = App(self)
+        self.window.show_all()
+        self.window.present()
 
 
 def main():
     app = ChromeDockProfiles()
-    return app.run(None)
+    return app.run(sys.argv)
 
 
 if __name__ == "__main__":

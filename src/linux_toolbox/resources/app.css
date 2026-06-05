@@ -1,0 +1,76 @@
+
+.app-shell {
+    background-color: @theme_bg_color;
+}
+
+.sidebar {
+    background-color: shade(@theme_bg_color, 0.96);
+    border-right: 1px solid @borders;
+}
+
+.nav-row {
+    padding: 0;
+    border-radius: 0;
+}
+
+.nav-row-box {
+    padding: 10px 12px 10px 0;
+}
+
+.nav-accent {
+    min-width: 4px;
+    border-radius: 0 4px 4px 0;
+    background-color: transparent;
+}
+
+.nav-row:selected {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+
+.nav-row:selected .nav-accent {
+    background-color: @theme_selected_fg_color;
+}
+
+.nav-label {
+    font-weight: 600;
+}
+
+.content-page {
+    background-color: @theme_base_color;
+}
+
+.card {
+    background-color: @theme_bg_color;
+    border: 1px solid @borders;
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.section-title {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.section-subtitle {
+    opacity: 0.78;
+}
+
+.pill {
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.pill-ok {
+    background-color: #2ec27e;
+}
+
+.pill-warn {
+    background-color: #e5a50a;
+}
+
+.pill-err {
+    background-color: #e01b24;
+}

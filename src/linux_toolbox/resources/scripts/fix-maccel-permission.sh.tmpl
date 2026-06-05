@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+log_path="{MOUSE_INSTALL_LOG}"
+mkdir -p "$(dirname "$log_path")"
+exec >>"$log_path" 2>&1
+
+echo "==== maccel permission fix started $(date -Is) ===="
+
+echo "Creating maccel group if needed..."
+{CREATE_GROUP_STEP}
+
+echo "Adding user to maccel group..."
+{ADD_USER_STEP}
+
+echo "Reloading udev rules..."
+udevadm control --reload-rules
+udevadm trigger
+
+echo "Reloading maccel module..."
+modprobe -r maccel || true
+modprobe maccel
+
+echo "Rechecking write permission..."
+ls -l "{SENS_MULT_PATH}" || true
+if [ -w "{SENS_MULT_PATH}" ]; then
+  echo "maccel permission fix: SENS_MULT writable"
+else
+  echo "maccel permission fix: SENS_MULT still not writable in fix process"
+fi
+echo "Groups for {USER}: $(id -nG "{USER}" 2>/dev/null || true)"
+echo "==== maccel permission fix finished $(date -Is) ===="

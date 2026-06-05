@@ -5,9 +5,12 @@ app_dir="$HOME/.local/share/chrome-dock-profiles"
 bin_dir="$HOME/.local/bin"
 desktop_file="$HOME/.local/share/applications/chrome-dock-profiles.desktop"
 new_desktop_file="$HOME/.local/share/applications/linux-toolbox.desktop"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$app_dir" "$bin_dir" "$HOME/.local/share/applications"
-cp "$(dirname "$0")/chrome_dock_profiles.py" "$app_dir/chrome_dock_profiles.py"
+cp "$script_dir/chrome_dock_profiles.py" "$app_dir/chrome_dock_profiles.py"
+rm -rf "$app_dir/src"
+cp -a "$script_dir/src" "$app_dir/src"
 chmod +x "$app_dir/chrome_dock_profiles.py"
 
 cat > "$bin_dir/chrome-dock-profiles" <<EOF

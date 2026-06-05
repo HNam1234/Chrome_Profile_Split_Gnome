@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -u
+
+log_path="{MOUSE_COMMAND_LOG}"
+mkdir -p "$(dirname "$log_path")"
+echo "$(date -Is) reapply mouse preset at login" >>"$log_path"
+
+if ! command -v maccel >/dev/null 2>&1; then
+  echo "$(date -Is) maccel CLI not found" >>"$log_path"
+  exit 0
+fi
+
+preset="$(python3 - <<'PY' 2>/dev/null
+import json
+from pathlib import Path
+path = Path("{CONFIG_PATH}")
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = {{}}
+print(data.get("mouseMovement", {{}}).get("activePreset", "unknown"))
+PY
+)"
+custom_sens="$(python3 - <<'PY' 2>/dev/null
+import json
+from pathlib import Path
+path = Path("{CONFIG_PATH}")
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    data = {{}}
+value = data.get("mouseMovement", {{}}).get("customSensMult", "")
+print(value)
+PY
+)"
+
+case "$preset" in
+  windows)
+    maccel set all common 1.0 1.0 1000.0 0.0 >>"$log_path" 2>&1 || exit 0
+    maccel set all linear 0.055 1.5 2.8 >>"$log_path" 2>&1 || exit 0
+    maccel set mode linear >>"$log_path" 2>&1 || exit 0
+    ;;
+  macos)
+    maccel set all common 1.0 1.0 1000.0 0.0 >>"$log_path" 2>&1 || exit 0
+    maccel set all natural 0.1 1.0 1.65 >>"$log_path" 2>&1 || exit 0
+    maccel set mode natural >>"$log_path" 2>&1 || exit 0
+    ;;
+  custom)
+    if [ -n "$custom_sens" ]; then
+      maccel set param sens-mult "$custom_sens" >>"$log_path" 2>&1 || exit 0
+    fi
+    ;;
+esac
+
+echo "$(date -Is) mouse preset reapplied: $preset" >>"$log_path"

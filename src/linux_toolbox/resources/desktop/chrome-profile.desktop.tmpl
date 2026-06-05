@@ -1,0 +1,22 @@
+[Desktop Entry]
+Version=1.0
+Name=Chrome - {NAME}
+GenericName=Web Browser
+Comment=Open Chrome with the {NAME} profile
+Exec={WRAPPER_PATH} "{DIRECTORY}" {CLASS_NAME} --new-window %U
+Terminal=false
+Icon={ICON}
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;application/xml;application/pdf;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+StartupWMClass={CLASS_NAME}
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec={WRAPPER_PATH} "{DIRECTORY}" {CLASS_NAME} --new-window
+
+[Desktop Action new-private-window]
+Name=New Incognito Window
+Exec={WRAPPER_PATH} "{DIRECTORY}" {CLASS_NAME} --incognito
