@@ -856,6 +856,7 @@ class App(Gtk.ApplicationWindow):
         self.syncing_features = False
         self.mouse_service = MouseMovementService()
         self.mouse_install_process = None
+        self.mouse_install_timer_id = None
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
@@ -964,18 +965,21 @@ class App(Gtk.ApplicationWindow):
         mouse_description.set_line_wrap(True)
         mouse_card.pack_start(mouse_description, False, False, 0)
 
-        install_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
-        mouse_card.pack_start(install_grid, False, False, 0)
+        install_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        mouse_card.pack_start(install_row, False, False, 0)
 
-        self.mouse_check_button = Gtk.Button(label="Check Backend")
-        self.mouse_check_button.set_tooltip_text("Refresh maccel backend and dependency status.")
-        self.mouse_check_button.connect("clicked", self.on_mouse_check_backend)
-        install_grid.attach(self.mouse_check_button, 0, 0, 1, 1)
+        self.mouse_backend_indicator = Gtk.Label()
+        self.mouse_backend_indicator.set_xalign(0)
+        install_row.pack_start(self.mouse_backend_indicator, True, True, 0)
 
         self.mouse_install_button = Gtk.Button(label="Install maccel")
         self.mouse_install_button.set_tooltip_text("Install maccel and required Ubuntu packages with authentication.")
         self.mouse_install_button.connect("clicked", self.on_mouse_install_backend)
-        install_grid.attach(self.mouse_install_button, 1, 0, 1, 1)
+        install_row.pack_end(self.mouse_install_button, False, False, 0)
+
+        self.mouse_install_progress = Gtk.ProgressBar()
+        self.mouse_install_progress.set_no_show_all(True)
+        mouse_card.pack_start(self.mouse_install_progress, False, False, 0)
 
         self.mouse_install_label = Gtk.Label()
         self.mouse_install_label.set_xalign(0)
@@ -1197,6 +1201,18 @@ class App(Gtk.ApplicationWindow):
         self.mouse_install_button.set_sensitive(
             supported and not maccel_available and install_status["pkexecAvailable"] and not install_running
         )
+        self.mouse_install_progress.set_visible(install_running)
+        if install_running:
+            self.mouse_install_progress.set_text("Installing maccel...")
+            self.mouse_install_progress.set_show_text(True)
+        else:
+            self.mouse_install_progress.set_fraction(0)
+            self.mouse_install_progress.set_show_text(False)
+
+        if maccel_available:
+            self.mouse_backend_indicator.set_markup("<b>[V] maccel installed</b>")
+        else:
+            self.mouse_backend_indicator.set_markup("<b>[X] maccel not installed</b>")
 
         if maccel_available:
             self.mouse_backend_label.set_text("Backend: maccel detected")
@@ -1208,6 +1224,9 @@ class App(Gtk.ApplicationWindow):
         install_lines = []
         if install_running:
             install_lines.append("Install check: maccel install is running.")
+            latest_line = self.latest_mouse_install_log_line()
+            if latest_line:
+                install_lines.append(f"Progress: {latest_line}")
         elif install_status["maccelInstalled"]:
             install_lines.append("Install check: maccel is installed.")
         elif not install_status["pkexecAvailable"]:
@@ -1242,6 +1261,27 @@ class App(Gtk.ApplicationWindow):
             self.mouse_warning_label.set_text("Mouse Movement is only supported on Linux.")
         else:
             self.mouse_warning_label.set_text("")
+
+    def latest_mouse_install_log_line(self):
+        if not MOUSE_INSTALL_LOG.exists():
+            return ""
+        try:
+            lines = MOUSE_INSTALL_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return ""
+        for line in reversed(lines):
+            line = line.strip()
+            if line:
+                return line[:180]
+        return ""
+
+    def pulse_mouse_install_progress(self):
+        if self.mouse_install_process is None or self.mouse_install_process.poll() is not None:
+            self.mouse_install_timer_id = None
+            return False
+        self.mouse_install_progress.pulse()
+        self.refresh_mouse_movement_state()
+        return True
 
     def refresh_current_style(self):
         current = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False)
@@ -1418,16 +1458,14 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Failed to apply Windows mouse movement: {error}")
         self.refresh_mouse_movement_state()
 
-    def on_mouse_check_backend(self, _button):
-        self.refresh_mouse_movement_state()
-        self.log("Mouse movement backend check refreshed.")
-
     def on_mouse_install_backend(self, _button):
         try:
             self.mouse_install_button.set_sensitive(False)
             self.log("Installing maccel backend. Ubuntu may ask for your password.")
             self.mouse_install_process = self.mouse_service.startMaccelBackendInstall()
             GLib.child_watch_add(self.mouse_install_process.pid, self.on_mouse_install_finished)
+            if self.mouse_install_timer_id is None:
+                self.mouse_install_timer_id = GLib.timeout_add(700, self.pulse_mouse_install_progress)
         except Exception as error:
             self.log(f"Failed to install maccel backend: {error}")
             self.mouse_install_process = None
@@ -1435,7 +1473,10 @@ class App(Gtk.ApplicationWindow):
 
     def on_mouse_install_finished(self, _pid, status):
         exit_code = status >> 8
+        if self.mouse_install_process is not None:
+            self.mouse_install_process.wait()
         self.mouse_install_process = None
+        self.mouse_install_timer_id = None
         if exit_code == 0 and self.mouse_service.isMaccelInstalled():
             self.log("maccel backend install finished. Log out and back in if group permissions were updated.")
         elif exit_code == 0:

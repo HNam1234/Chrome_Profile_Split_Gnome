@@ -27,7 +27,7 @@ The app gives you a guided tabbed GUI with:
 - Dock click style choices.
 - Hover preview extension installation.
 - A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
-- A Mouse Movement tab with Windows, macOS, and Restore Previous buttons.
+- A Mouse Movement tab with install status, maccel installer progress, Windows, macOS, and Restore Previous buttons.
 
 ## What It Does
 
@@ -77,7 +77,9 @@ Mouse Movement uses the open-source `maccel` Linux mouse acceleration backend:
 
 https://github.com/Gnarus-G/maccel
 
-The GUI exposes a simple backend check and install button. It does not install anything silently. If you click **Install maccel**, Ubuntu will ask for authentication and the app will install maccel plus required packages such as `curl`, `git`, `make`, `dkms`, `gcc`, and matching Linux headers.
+The GUI shows a simple `[V]` or `[X]` backend indicator and an install button. It does not install anything silently. If you click **Install maccel**, Ubuntu will ask for authentication and the app will install maccel plus required packages such as `curl`, `git`, `make`, `dkms`, `gcc`, and matching Linux headers.
+
+While installation runs, the Mouse Movement tab shows an active progress bar and the latest install log line.
 
 If `maccel` is available in `PATH`, open **Chrome Dock Profiles** and use:
 
