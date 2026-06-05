@@ -29,7 +29,7 @@ The app gives you a guided tabbed GUI with:
 - Detected Chrome/Chromium profile cards.
 - One-click install/update for profile dock icons.
 - One-click pinning to Ubuntu Dock.
-- A Windows taskbar-style dock layout preset with restore.
+- A Windows taskbar-style dock layout toggle with Ubuntu default restore.
 - Dock click style choices.
 - Hover preview extension installation.
 - A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
@@ -43,8 +43,8 @@ The old `chrome-dock-profiles` command is still installed as a compatibility ali
 - Creates one `.desktop` launcher per profile.
 - Uses each profile picture as the dock icon when available.
 - Pins the profile launchers to Ubuntu Dock.
-- Moves Ubuntu Dock to a bottom, full-width, always-visible Windows-style taskbar layout.
-- Saves the previous dock layout before applying the Windows taskbar preset.
+- Moves Ubuntu Dock to a bottom, full-width, always-visible Windows-style taskbar layout with Show Applications on the left.
+- Lets you toggle back to the Ubuntu default dock layout or restore the previous saved dock layout.
 - Lets you choose dock click behavior:
   - Smooth Minimize
   - Minimize + Previews

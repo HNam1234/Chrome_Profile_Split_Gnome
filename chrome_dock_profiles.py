@@ -72,6 +72,7 @@ DOCK_LAYOUT_KEYS = (
     "show-favorites",
     "show-running",
     "show-show-apps-button",
+    "show-apps-at-top",
 )
 WINDOWS_DOCK_PRESET = {
     "dock-position": "BOTTOM",
@@ -82,6 +83,18 @@ WINDOWS_DOCK_PRESET = {
     "show-favorites": "true",
     "show-running": "true",
     "show-show-apps-button": "true",
+    "show-apps-at-top": "true",
+}
+DEFAULT_DOCK_PRESET = {
+    "dock-position": "LEFT",
+    "extend-height": "true",
+    "dock-fixed": "true",
+    "autohide": "false",
+    "intellihide": "false",
+    "show-favorites": "true",
+    "show-running": "true",
+    "show-show-apps-button": "true",
+    "show-apps-at-top": "false",
 }
 
 
@@ -1072,6 +1085,7 @@ class App(Gtk.ApplicationWindow):
         self.profiles = []
         self.syncing_style = False
         self.syncing_features = False
+        self.syncing_dock_layout = False
         self.syncing_sidebar = False
         self.mouse_service = MouseMovementService()
         self.vietnamese_service = VietnameseInputService(lambda message: self.log(message))
@@ -1345,6 +1359,13 @@ class App(Gtk.ApplicationWindow):
 
         layout_card = self.create_card("Dock Layout", "Set the Ubuntu Dock once to a Windows-style horizontal taskbar.")
         dock_tab.pack_start(layout_card, False, False, 0)
+
+        self.dock_layout_switch = self.create_feature_switch(
+            layout_card,
+            "Windows Taskbar Layout",
+            "Turn on the bottom Windows-style dock. Turn off to restore the Ubuntu default dock layout.",
+            self.on_dock_layout_switch_toggled,
+        )
 
         layout_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         layout_card.pack_start(layout_grid, False, False, 0)
@@ -2146,6 +2167,12 @@ class App(Gtk.ApplicationWindow):
             for key, value in WINDOWS_DOCK_PRESET.items()
         )
 
+    def dock_layout_is_default(self, settings):
+        return all(
+            normalize_gsettings_value(settings.get(key, "")) == normalize_gsettings_value(value)
+            for key, value in DEFAULT_DOCK_PRESET.items()
+        )
+
     def dock_layout_label(self):
         try:
             settings = self.read_dock_layout_settings()
@@ -2153,6 +2180,8 @@ class App(Gtk.ApplicationWindow):
             return "Unavailable"
         if self.dock_layout_is_windows_taskbar(settings):
             return "Windows taskbar"
+        if self.dock_layout_is_default(settings):
+            return "Ubuntu default"
         return "Custom"
 
     def dock_layout_restore_available(self):
@@ -2184,12 +2213,20 @@ class App(Gtk.ApplicationWindow):
         restore_available = self.dock_layout_restore_available()
         if layout == "Unavailable":
             self.dock_layout_status_label.set_text("Dock layout: unavailable. Dash-to-Dock settings were not found.")
+            self.syncing_dock_layout = True
+            self.dock_layout_switch.set_active(False)
+            self.syncing_dock_layout = False
+            self.dock_layout_switch.set_sensitive(False)
             self.dock_windows_button.set_sensitive(False)
             self.dock_restore_button.set_sensitive(False)
         else:
             self.dock_layout_status_label.set_text(
                 f"Dock layout: {layout}. Restore point: {'saved' if restore_available else 'none yet'}."
             )
+            self.syncing_dock_layout = True
+            self.dock_layout_switch.set_active(layout == "Windows taskbar")
+            self.syncing_dock_layout = False
+            self.dock_layout_switch.set_sensitive(True)
             self.dock_windows_button.set_sensitive(True)
             self.dock_restore_button.set_sensitive(restore_available)
         self.refresh_overview_summary()
@@ -2810,6 +2847,26 @@ class App(Gtk.ApplicationWindow):
         except Exception as error:
             self.log(f"Failed to set Windows taskbar dock layout: {error}")
         self.refresh_dock_layout_state()
+
+    def on_dock_layout_switch_toggled(self, switch, state):
+        if self.syncing_dock_layout:
+            return False
+        try:
+            if state:
+                previous_settings = self.read_dock_layout_settings()
+                self.save_dock_layout_restore_point(previous_settings, "windowsTaskbar")
+                self.apply_dock_layout_settings(WINDOWS_DOCK_PRESET)
+                self.log("Dock layout set to Windows taskbar.")
+            else:
+                self.apply_dock_layout_settings(DEFAULT_DOCK_PRESET)
+                self.clear_dock_layout_active_preset()
+                self.log("Dock layout restored to Ubuntu default.")
+            switch.set_state(state)
+        except Exception as error:
+            self.log(f"Failed to update dock layout: {error}")
+            switch.set_state(not state)
+        self.refresh_dock_layout_state()
+        return True
 
     def on_dock_restore_layout(self, _button):
         try:
