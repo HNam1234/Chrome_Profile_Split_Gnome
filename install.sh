@@ -13,7 +13,9 @@ rm -rf "$app_dir/src"
 cp -a "$script_dir/src" "$app_dir/src"
 chmod +x "$app_dir/chrome_dock_profiles.py"
 
-cat > "$bin_dir/chrome-dock-profiles" <<EOF
+write_launcher() {
+  local target="$1"
+  cat > "$target" <<EOF
 #!/usr/bin/env bash
 set -e
 
@@ -23,14 +25,18 @@ fi
 
 exec python3 "$app_dir/chrome_dock_profiles.py" "\$@"
 EOF
-chmod +x "$bin_dir/chrome-dock-profiles"
+  chmod +x "$target"
+}
+
+write_launcher "$bin_dir/chrome-dock-profiles"
+write_launcher "$bin_dir/linux-toolbox"
 
 cat > "$new_desktop_file" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=Linux Toolbox
 Comment=Set-and-forget Ubuntu tools for Chrome profiles, dock, clipboard, and mouse movement
-Exec=$bin_dir/chrome-dock-profiles
+Exec=$bin_dir/linux-toolbox
 Terminal=false
 Type=Application
 Categories=Utility;
@@ -40,4 +46,5 @@ rm -f "$desktop_file"
 
 update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
 echo "Installed. Open 'Linux Toolbox' from Applications, or run:"
-echo "$bin_dir/chrome-dock-profiles"
+echo "$bin_dir/linux-toolbox"
+echo "Compatibility command kept: $bin_dir/chrome-dock-profiles"

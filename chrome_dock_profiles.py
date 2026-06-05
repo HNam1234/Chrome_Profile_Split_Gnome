@@ -62,6 +62,27 @@ BAMBOO_CONFIG_BACKUP_PATH = CONFIG_DIR / "ibus-bamboo.config.json.backup"
 GNOME_INPUT_SOURCES_SCHEMA = "org.gnome.desktop.input-sources"
 GNOME_INPUT_SOURCES_KEY = "sources"
 BAMBOO_INPUT_SOURCE = ("ibus", "Bamboo")
+DASH_TO_DOCK_SCHEMA = "org.gnome.shell.extensions.dash-to-dock"
+DOCK_LAYOUT_KEYS = (
+    "dock-position",
+    "extend-height",
+    "dock-fixed",
+    "autohide",
+    "intellihide",
+    "show-favorites",
+    "show-running",
+    "show-show-apps-button",
+)
+WINDOWS_DOCK_PRESET = {
+    "dock-position": "BOTTOM",
+    "extend-height": "true",
+    "dock-fixed": "true",
+    "autohide": "false",
+    "intellihide": "false",
+    "show-favorites": "true",
+    "show-running": "true",
+    "show-show-apps-button": "true",
+}
 
 
 STYLE_ACTIONS = {
@@ -93,6 +114,13 @@ def parse_gsettings_list(raw):
 
 def format_gsettings_list(items):
     return "[" + ", ".join(f"'{item}'" for item in items) + "]"
+
+
+def normalize_gsettings_value(value):
+    value = str(value).strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        return value[1:-1]
+    return value
 
 
 def sanitize_id(value):
@@ -1315,6 +1343,29 @@ class App(Gtk.ApplicationWindow):
         self.mouse_warning_label.set_line_wrap(True)
         mouse_card.pack_start(self.mouse_warning_label, False, False, 0)
 
+        layout_card = self.create_card("Dock Layout", "Set the Ubuntu Dock once to a Windows-style horizontal taskbar.")
+        dock_tab.pack_start(layout_card, False, False, 0)
+
+        layout_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        layout_card.pack_start(layout_grid, False, False, 0)
+
+        self.dock_windows_button = self.create_primary_button(
+            "Apply Windows Taskbar",
+            "Move the dock to the bottom, stretch it across the screen, and keep it visible.",
+        )
+        self.dock_windows_button.connect("clicked", self.on_dock_windows_taskbar)
+        layout_grid.attach(self.dock_windows_button, 0, 0, 1, 1)
+
+        self.dock_restore_button = Gtk.Button(label="Restore Previous")
+        self.dock_restore_button.set_tooltip_text("Restore the dock layout saved before the last Windows taskbar apply.")
+        self.dock_restore_button.connect("clicked", self.on_dock_restore_layout)
+        layout_grid.attach(self.dock_restore_button, 1, 0, 1, 1)
+
+        self.dock_layout_status_label = Gtk.Label()
+        self.dock_layout_status_label.set_xalign(0)
+        self.dock_layout_status_label.set_line_wrap(True)
+        layout_card.pack_start(self.dock_layout_status_label, False, False, 0)
+
         style_card = self.create_card("Dock Click Style", "Choose how a normal left-click on a dock icon behaves.")
         dock_tab.pack_start(style_card, False, False, 0)
 
@@ -1499,6 +1550,7 @@ class App(Gtk.ApplicationWindow):
 
         self.refresh_compatibility()
         self.refresh_current_style()
+        self.refresh_dock_layout_state()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
@@ -1772,9 +1824,13 @@ class App(Gtk.ApplicationWindow):
         except Exception:
             vietnamese_status = "Unknown"
         try:
-            style_action = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False).strip("'")
+            style_action = run(["gsettings", "get", DASH_TO_DOCK_SCHEMA, "click-action"], check=False).strip("'")
         except Exception:
             style_action = "unknown"
+        try:
+            dock_layout = self.dock_layout_label()
+        except Exception:
+            dock_layout = "Unavailable"
 
         pills = [
             ("Chrome Profiles: On" if chrome_ready else "Chrome Profiles: Setup", "ok" if chrome_ready else "warn"),
@@ -1789,6 +1845,10 @@ class App(Gtk.ApplicationWindow):
                 "ok" if vietnamese_status == "Ready" else ("err" if vietnamese_status == "Needs install" else "warn"),
             ),
             (f"Dock: {style_action or 'unknown'}", "ok" if style_action else "warn"),
+            (
+                f"Dock Layout: {dock_layout}",
+                "ok" if dock_layout == "Windows taskbar" else ("err" if dock_layout == "Unavailable" else "warn"),
+            ),
         ]
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
@@ -2056,8 +2116,86 @@ class App(Gtk.ApplicationWindow):
         self.refresh_mouse_movement_state()
         return True
 
+    def dash_to_dock_available(self):
+        schemas = run(["gsettings", "list-schemas"], check=False).splitlines()
+        return DASH_TO_DOCK_SCHEMA in schemas
+
+    def read_dock_layout_settings(self):
+        if not self.dash_to_dock_available():
+            raise RuntimeError("Dash-to-Dock settings are not available on this system.")
+        settings = {}
+        for key in DOCK_LAYOUT_KEYS:
+            value = run(["gsettings", "get", DASH_TO_DOCK_SCHEMA, key], check=False).strip()
+            if not value:
+                raise RuntimeError(f"Could not read Dash-to-Dock setting: {key}")
+            settings[key] = value
+        return settings
+
+    def set_dock_layout_setting(self, key, value):
+        run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, key, normalize_gsettings_value(value)])
+
+    def apply_dock_layout_settings(self, settings):
+        if not self.dash_to_dock_available():
+            raise RuntimeError("Dash-to-Dock settings are not available on this system.")
+        for key, value in settings.items():
+            self.set_dock_layout_setting(key, value)
+
+    def dock_layout_is_windows_taskbar(self, settings):
+        return all(
+            normalize_gsettings_value(settings.get(key, "")) == normalize_gsettings_value(value)
+            for key, value in WINDOWS_DOCK_PRESET.items()
+        )
+
+    def dock_layout_label(self):
+        try:
+            settings = self.read_dock_layout_settings()
+        except Exception:
+            return "Unavailable"
+        if self.dock_layout_is_windows_taskbar(settings):
+            return "Windows taskbar"
+        return "Custom"
+
+    def dock_layout_restore_available(self):
+        state = load_app_config().get("dockLayout")
+        return isinstance(state, dict) and isinstance(state.get("previousSettings"), dict)
+
+    def save_dock_layout_restore_point(self, previous_settings, active_preset):
+        config = load_app_config()
+        config["dockLayout"] = {
+            "activePreset": active_preset,
+            "previousSettings": previous_settings,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        save_app_config(config)
+
+    def clear_dock_layout_active_preset(self):
+        config = load_app_config()
+        state = config.get("dockLayout")
+        if not isinstance(state, dict):
+            return
+        state["activePreset"] = "restored"
+        config["dockLayout"] = state
+        save_app_config(config)
+
+    def refresh_dock_layout_state(self):
+        if not hasattr(self, "dock_layout_status_label"):
+            return
+        layout = self.dock_layout_label()
+        restore_available = self.dock_layout_restore_available()
+        if layout == "Unavailable":
+            self.dock_layout_status_label.set_text("Dock layout: unavailable. Dash-to-Dock settings were not found.")
+            self.dock_windows_button.set_sensitive(False)
+            self.dock_restore_button.set_sensitive(False)
+        else:
+            self.dock_layout_status_label.set_text(
+                f"Dock layout: {layout}. Restore point: {'saved' if restore_available else 'none yet'}."
+            )
+            self.dock_windows_button.set_sensitive(True)
+            self.dock_restore_button.set_sensitive(restore_available)
+        self.refresh_overview_summary()
+
     def refresh_current_style(self):
-        current = run(["gsettings", "get", "org.gnome.shell.extensions.dash-to-dock", "click-action"], check=False)
+        current = run(["gsettings", "get", DASH_TO_DOCK_SCHEMA, "click-action"], check=False)
         current = current.strip("'")
         self.syncing_style = True
         if current in self.style_buttons:
@@ -2139,6 +2277,7 @@ class App(Gtk.ApplicationWindow):
     def on_refresh(self, _button):
         self.refresh_compatibility()
         self.refresh_current_style()
+        self.refresh_dock_layout_state()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
@@ -2662,15 +2801,37 @@ class App(Gtk.ApplicationWindow):
             self.log(f"Failed to restore previous mouse settings: {error}")
         self.refresh_mouse_movement_state()
 
+    def on_dock_windows_taskbar(self, _button):
+        try:
+            previous_settings = self.read_dock_layout_settings()
+            self.save_dock_layout_restore_point(previous_settings, "windowsTaskbar")
+            self.apply_dock_layout_settings(WINDOWS_DOCK_PRESET)
+            self.log("Dock layout set to Windows taskbar.")
+        except Exception as error:
+            self.log(f"Failed to set Windows taskbar dock layout: {error}")
+        self.refresh_dock_layout_state()
+
+    def on_dock_restore_layout(self, _button):
+        try:
+            state = load_app_config().get("dockLayout")
+            if not isinstance(state, dict) or not isinstance(state.get("previousSettings"), dict):
+                raise RuntimeError("No previous dock layout restore point was found.")
+            self.apply_dock_layout_settings(state["previousSettings"])
+            self.clear_dock_layout_active_preset()
+            self.log("Previous dock layout restored.")
+        except Exception as error:
+            self.log(f"Failed to restore previous dock layout: {error}")
+        self.refresh_dock_layout_state()
+
     def on_style_toggled(self, button, action):
         if self.syncing_style:
             return
         if not button.get_active():
             return
         try:
-            run(["gsettings", "set", "org.gnome.shell.extensions.dash-to-dock", "click-action", action])
-            run(["gsettings", "set", "org.gnome.shell.extensions.dash-to-dock", "middle-click-action", "previews"])
-            run(["gsettings", "set", "org.gnome.shell.extensions.dash-to-dock", "activate-single-window", "true"])
+            run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, "click-action", action])
+            run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, "middle-click-action", "previews"])
+            run(["gsettings", "set", DASH_TO_DOCK_SCHEMA, "activate-single-window", "true"])
             self.style_description.set_text(self.describe_style(action))
             self.log(f"Dock click style set to {action}.")
         except Exception as error:

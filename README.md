@@ -1,22 +1,27 @@
-# Chrome Profile Split GNOME
+# Linux Toolbox
 
-Small Ubuntu GNOME utilities for a more Windows-like desktop workflow:
+Set-and-forget Ubuntu GNOME utilities for a more Windows-like desktop workflow. Linux Toolbox is built for one-time setup: choose the desktop behavior you want, then use your machine without thinking about those tweaks again.
 
 - Separate dock icons for each Chrome/Chromium profile.
+- A Windows-style horizontal dock preset for Ubuntu Dock.
 - `Super+V` clipboard history popup powered by CopyQ.
 - Simple Windows/macOS-like mouse movement presets powered by maccel.
 
-## Chrome Profile Dock Icons
+## Install
 
-### Install
+Install once, then open **Linux Toolbox** whenever you want to check or change a setup:
 
 ```bash
-git clone git@github.com:HNam1234/Chrome_Profile_Split_Gnome.git
-cd Chrome_Profile_Split_Gnome
+git clone https://github.com/HNam1234/linux-toolbox.git
+cd linux-toolbox
 ./install.sh
 ```
 
-Then open **Linux Toolbox** from Applications.
+Then open **Linux Toolbox** from Applications, or run:
+
+```bash
+linux-toolbox
+```
 
 The app gives you a guided tabbed GUI with:
 
@@ -24,10 +29,13 @@ The app gives you a guided tabbed GUI with:
 - Detected Chrome/Chromium profile cards.
 - One-click install/update for profile dock icons.
 - One-click pinning to Ubuntu Dock.
+- A Windows taskbar-style dock layout preset with restore.
 - Dock click style choices.
 - Hover preview extension installation.
 - A Clipboard tab with CopyQ clipboard history toggle and `Super+V` binding.
 - A Mouse Movement tab with install status, maccel installer progress, Windows, macOS, and Restore Previous buttons.
+
+The old `chrome-dock-profiles` command is still installed as a compatibility alias for existing users.
 
 ## What It Does
 
@@ -35,6 +43,8 @@ The app gives you a guided tabbed GUI with:
 - Creates one `.desktop` launcher per profile.
 - Uses each profile picture as the dock icon when available.
 - Pins the profile launchers to Ubuntu Dock.
+- Moves Ubuntu Dock to a bottom, full-width, always-visible Windows-style taskbar layout.
+- Saves the previous dock layout before applying the Windows taskbar preset.
 - Lets you choose dock click behavior:
   - Smooth Minimize
   - Minimize + Previews
@@ -57,7 +67,7 @@ Clipboard history is handled by **CopyQ**, a mature clipboard manager packaged b
 ### Install
 
 ```bash
-cd Chrome_Profile_Split_Gnome/clipboard-history
+cd linux-toolbox/clipboard-history
 ./install.sh
 ```
 

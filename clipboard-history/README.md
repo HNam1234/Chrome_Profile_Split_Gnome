@@ -1,12 +1,12 @@
 # Clipboard History With CopyQ
 
-Clipboard history setup for Ubuntu GNOME using CopyQ.
+Clipboard history setup for Ubuntu GNOME using CopyQ, as part of Linux Toolbox's setup-once workflow.
 
 ## Install
 
 ```bash
-git clone git@github.com:HNam1234/Chrome_Profile_Split_Gnome.git
-cd Chrome_Profile_Split_Gnome/clipboard-history
+git clone https://github.com/HNam1234/linux-toolbox.git
+cd linux-toolbox/clipboard-history
 ./install.sh
 ```
 
