@@ -970,11 +970,42 @@ BUILT_MODULE_NAME[0]="maccel"
 DEST_MODULE_LOCATION[0]="/kernel/drivers/usb"
 AUTOINSTALL="yes"
 EOF_DKMS_CONFIG
-    sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "$source_dir/Makefile"
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      sed -i "s/CC=gcc\\([^0-9-]\\|$\\)/CC=$kernel_compiler\\1/g" "$file"
+      sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "$file"
+    done <<EOF_COMPILER_PATCH_FILES
+$(grep -RIl "CC=gcc" "$source_dir" 2>/dev/null || true)
+EOF_COMPILER_PATCH_FILES
     export CC="$kernel_compiler"
   else
     echo "Patch compiler_path: not needed"
   fi
+}}
+
+verifyCompilerPatch() {{
+  source_dir="$1"
+  if [ -z "$kernel_compiler" ] || ! command -v "$kernel_compiler" >/dev/null 2>&1; then
+    echo "Patch compiler_path: verification skipped"
+    return 0
+  fi
+
+  echo "Final DKMS config:"
+  cat "$source_dir/dkms.conf"
+
+  hardcoded_matches="$(grep -RIn "CC=gcc" "$source_dir" 2>/dev/null | grep -v "CC=$kernel_compiler" || true)"
+  if [ -n "$hardcoded_matches" ]; then
+    echo "Compiler patch verification failed: DKMS source still contains CC=gcc"
+    echo "$hardcoded_matches"
+    return 1
+  fi
+
+  if ! grep -q "CC=$kernel_compiler" "$source_dir/dkms.conf"; then
+    echo "Compiler patch verification failed: DKMS config missing CC=$kernel_compiler"
+    return 1
+  fi
+
+  echo "Patch compiler_path: verified no hardcoded CC=gcc remains"
 }}
 
 applyDkmsConfigPatchIfNeeded() {{
@@ -1021,6 +1052,7 @@ applyPatchesIfNeeded() {{
     verifyEnumSyntaxPatch /opt/maccel
   fi
   applyCompilerPatchIfNeeded "$source_dir" "$version"
+  verifyCompilerPatch "$source_dir"
   applyDkmsConfigPatchIfNeeded "$source_dir"
 }}
 
