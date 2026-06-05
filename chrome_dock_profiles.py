@@ -31,6 +31,8 @@ CONFIG_DIR = HOME / ".config/chrome-dock-profiles"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 MOUSE_BACKUP_PATH = CONFIG_DIR / "maccel-previous-state.json"
 MOUSE_COMMAND_LOG = CONFIG_DIR / "mouse-movement-commands.log"
+MOUSE_INSTALLER = BIN_DIR / "chrome-dock-profiles-install-maccel"
+MOUSE_INSTALL_LOG = CONFIG_DIR / "maccel-install.log"
 
 STYLE_ACTIONS = {
     "Smooth Minimize": ("minimize", "Left-click minimizes/restores. Most stable."),
@@ -704,6 +706,7 @@ class MaccelBackend:
 class MouseMovementService:
     def __init__(self):
         self.backend = MaccelBackend(self._log_command)
+        self.required_commands = ("curl", "git", "make", "dkms", "gcc", "sudo")
 
     def isSupportedPlatform(self):
         return platform.system().lower() == "linux"
@@ -719,6 +722,19 @@ class MouseMovementService:
 
     def isMaccelInstalled(self):
         return self.backend.isAvailable()
+
+    def getInstallStatus(self):
+        missing_commands = [command for command in self.required_commands if shutil.which(command) is None]
+        kernel_release = run(["uname", "-r"], check=False) or "unknown"
+        headers_path = Path("/lib/modules") / kernel_release / "build"
+        return {
+            "maccelInstalled": self.isMaccelInstalled(),
+            "pkexecAvailable": shutil.which("pkexec") is not None,
+            "missingCommands": missing_commands,
+            "kernelHeadersInstalled": headers_path.exists(),
+            "kernelRelease": kernel_release,
+            "installLogPath": str(MOUSE_INSTALL_LOG),
+        }
 
     def getCurrentPresetState(self):
         return load_app_config().get("mouseMovement", {}).get("activePreset", "unknown")
@@ -738,6 +754,25 @@ class MouseMovementService:
 
     def runMaccelCommandSafely(self, command):
         return self.backend._run(command)
+
+    def installMaccelBackend(self):
+        if not self.isSupportedPlatform():
+            raise RuntimeError("maccel install is only supported on Linux.")
+        if shutil.which("pkexec") is None:
+            raise RuntimeError("pkexec is not installed. Install maccel manually from https://github.com/Gnarus-G/maccel")
+        installer = self._write_installer_script()
+        self._log_command(["pkexec", str(installer)])
+        run(["pkexec", str(installer)])
+
+    def startMaccelBackendInstall(self):
+        if not self.isSupportedPlatform():
+            raise RuntimeError("maccel install is only supported on Linux.")
+        if shutil.which("pkexec") is None:
+            raise RuntimeError("pkexec is not installed. Install maccel manually from https://github.com/Gnarus-G/maccel")
+        installer = self._write_installer_script()
+        command = ["pkexec", str(installer)]
+        self._log_command(command)
+        return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _apply_preset(self, active_preset, apply_callback):
         backup_path = self.backupCurrentMaccelState()
@@ -766,6 +801,49 @@ class MouseMovementService:
         with MOUSE_COMMAND_LOG.open("a", encoding="utf-8") as handle:
             handle.write(f"{iso_now()} {' '.join(command)}\n")
 
+    def _write_installer_script(self):
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        MOUSE_INSTALLER.write_text(
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+
+log_path="{MOUSE_INSTALL_LOG}"
+mkdir -p "$(dirname "$log_path")"
+exec >>"$log_path" 2>&1
+
+echo "==== maccel install started $(date -Is) ===="
+export DEBIAN_FRONTEND=noninteractive
+
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y curl git make dkms gcc sudo wget ca-certificates "linux-headers-$(uname -r)"
+else
+  echo "apt-get was not found. Install maccel dependencies manually for this distro."
+  exit 1
+fi
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+git clone --depth 1 https://github.com/Gnarus-G/maccel.git "$workdir/maccel"
+cd "$workdir/maccel"
+bash ./install.sh
+
+groupadd -f maccel
+if [ -n "${{PKEXEC_UID:-}}" ]; then
+  target_user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1 || true)"
+  if [ -n "$target_user" ]; then
+    usermod -aG maccel "$target_user" || true
+  fi
+fi
+
+echo "==== maccel install finished $(date -Is) ===="
+""",
+            encoding="utf-8",
+        )
+        MOUSE_INSTALLER.chmod(0o755)
+        return MOUSE_INSTALLER
+
 
 class App(Gtk.ApplicationWindow):
     def __init__(self, application):
@@ -777,6 +855,7 @@ class App(Gtk.ApplicationWindow):
         self.syncing_style = False
         self.syncing_features = False
         self.mouse_service = MouseMovementService()
+        self.mouse_install_process = None
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
@@ -884,6 +963,24 @@ class App(Gtk.ApplicationWindow):
         mouse_description.set_xalign(0)
         mouse_description.set_line_wrap(True)
         mouse_card.pack_start(mouse_description, False, False, 0)
+
+        install_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        mouse_card.pack_start(install_grid, False, False, 0)
+
+        self.mouse_check_button = Gtk.Button(label="Check Backend")
+        self.mouse_check_button.set_tooltip_text("Refresh maccel backend and dependency status.")
+        self.mouse_check_button.connect("clicked", self.on_mouse_check_backend)
+        install_grid.attach(self.mouse_check_button, 0, 0, 1, 1)
+
+        self.mouse_install_button = Gtk.Button(label="Install maccel")
+        self.mouse_install_button.set_tooltip_text("Install maccel and required Ubuntu packages with authentication.")
+        self.mouse_install_button.connect("clicked", self.on_mouse_install_backend)
+        install_grid.attach(self.mouse_install_button, 1, 0, 1, 1)
+
+        self.mouse_install_label = Gtk.Label()
+        self.mouse_install_label.set_xalign(0)
+        self.mouse_install_label.set_line_wrap(True)
+        mouse_card.pack_start(self.mouse_install_label, False, False, 0)
 
         mouse_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         mouse_card.pack_start(mouse_grid, False, False, 0)
@@ -1092,9 +1189,14 @@ class App(Gtk.ApplicationWindow):
         env = self.mouse_service.getEnvironment()
         supported = self.mouse_service.isSupportedPlatform()
         maccel_available = supported and self.mouse_service.isMaccelInstalled()
+        install_status = self.mouse_service.getInstallStatus()
+        install_running = self.mouse_install_process is not None and self.mouse_install_process.poll() is None
         self.mouse_windows_button.set_sensitive(maccel_available)
         self.mouse_macos_button.set_sensitive(maccel_available)
         self.mouse_restore_button.set_sensitive(maccel_available and MOUSE_BACKUP_PATH.exists())
+        self.mouse_install_button.set_sensitive(
+            supported and not maccel_available and install_status["pkexecAvailable"] and not install_running
+        )
 
         if maccel_available:
             self.mouse_backend_label.set_text("Backend: maccel detected")
@@ -1102,6 +1204,29 @@ class App(Gtk.ApplicationWindow):
             self.mouse_backend_label.set_text(
                 "Backend: maccel not installed\nThis feature requires the open-source maccel backend."
             )
+
+        install_lines = []
+        if install_running:
+            install_lines.append("Install check: maccel install is running.")
+        elif install_status["maccelInstalled"]:
+            install_lines.append("Install check: maccel is installed.")
+        elif not install_status["pkexecAvailable"]:
+            install_lines.append("Install check: pkexec is missing. Install maccel manually.")
+        else:
+            install_lines.append("Install check: ready to install maccel with authentication.")
+
+        if install_status["missingCommands"]:
+            install_lines.append("Missing tools: " + ", ".join(install_status["missingCommands"]))
+        else:
+            install_lines.append("Required tools: detected")
+
+        if install_status["kernelHeadersInstalled"]:
+            install_lines.append(f"Kernel headers: detected for {install_status['kernelRelease']}")
+        else:
+            install_lines.append(f"Kernel headers: will install for {install_status['kernelRelease']}")
+
+        install_lines.append(f"Install log: {install_status['installLogPath']}")
+        self.mouse_install_label.set_text("\n".join(install_lines))
 
         active = self.mouse_service.getCurrentPresetState()
         active_label = {
@@ -1291,6 +1416,32 @@ class App(Gtk.ApplicationWindow):
             self.log("Active preset: Windows")
         except Exception as error:
             self.log(f"Failed to apply Windows mouse movement: {error}")
+        self.refresh_mouse_movement_state()
+
+    def on_mouse_check_backend(self, _button):
+        self.refresh_mouse_movement_state()
+        self.log("Mouse movement backend check refreshed.")
+
+    def on_mouse_install_backend(self, _button):
+        try:
+            self.mouse_install_button.set_sensitive(False)
+            self.log("Installing maccel backend. Ubuntu may ask for your password.")
+            self.mouse_install_process = self.mouse_service.startMaccelBackendInstall()
+            GLib.child_watch_add(self.mouse_install_process.pid, self.on_mouse_install_finished)
+        except Exception as error:
+            self.log(f"Failed to install maccel backend: {error}")
+            self.mouse_install_process = None
+        self.refresh_mouse_movement_state()
+
+    def on_mouse_install_finished(self, _pid, status):
+        exit_code = status >> 8
+        self.mouse_install_process = None
+        if exit_code == 0 and self.mouse_service.isMaccelInstalled():
+            self.log("maccel backend install finished. Log out and back in if group permissions were updated.")
+        elif exit_code == 0:
+            self.log(f"maccel installer finished, but maccel was not detected. Check {MOUSE_INSTALL_LOG}.")
+        else:
+            self.log(f"maccel install failed. Check {MOUSE_INSTALL_LOG}.")
         self.refresh_mouse_movement_state()
 
     def on_mouse_macos(self, _button):

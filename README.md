@@ -77,13 +77,21 @@ Mouse Movement uses the open-source `maccel` Linux mouse acceleration backend:
 
 https://github.com/Gnarus-G/maccel
 
-The GUI does not install maccel, does not run sudo, and does not expose curve editing. If `maccel` is available in `PATH`, open **Chrome Dock Profiles** and use:
+The GUI exposes a simple backend check and install button. It does not install anything silently. If you click **Install maccel**, Ubuntu will ask for authentication and the app will install maccel plus required packages such as `curl`, `git`, `make`, `dkms`, `gcc`, and matching Linux headers.
+
+If `maccel` is available in `PATH`, open **Chrome Dock Profiles** and use:
 
 - **Windows** for a Windows Enhanced Pointer Precision-like approximation.
 - **macOS** for a smooth macOS-like approximation.
 - **Restore Previous** to restore the maccel settings backed up before the last preset.
 
 On Wayland, support may depend on compositor behavior.
+
+Install logs are written to:
+
+```text
+~/.config/chrome-dock-profiles/maccel-install.log
+```
 
 ## Compatibility
 
