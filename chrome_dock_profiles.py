@@ -982,16 +982,13 @@ EOF_DKMS_CONFIG
 
 patchCompilerHardcodes() {{
   patch_dir="$1"
-  echo "Searching compiler hardcodes in $patch_dir"
-  grep -RIn "make CC=gcc\\|CC=gcc" "$patch_dir" 2>/dev/null || true
+  echo "Searching exact compiler assignments in $patch_dir"
+  grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" "$patch_dir" 2>/dev/null || true
   while IFS= read -r file; do
     [ -n "$file" ] || continue
-    sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "$file"
-    sed -i "s/make CC=gcc\\([^0-9-]\\|$\\)/make CC=\\$(CC)\\1/g" "$file"
-    sed -i "s/\\$(MAKE) CC=gcc\\([^0-9-]\\|$\\)/\\$(MAKE) CC=\\$(CC)\\1/g" "$file"
-    sed -i "s/CC=gcc\\([^0-9-]\\|$\\)/CC=$kernel_compiler\\1/g" "$file"
+    sed -i "s/^[[:space:]]*CC=gcc[[:space:]]*$/CC ?= gcc/" "$file"
   done <<EOF_COMPILER_PATCH_FILES
-$(grep -RIl "make CC=gcc\\|CC=gcc" "$patch_dir" 2>/dev/null || true)
+$(grep -RIl "^[[:space:]]*CC=gcc[[:space:]]*$" "$patch_dir" 2>/dev/null || true)
 EOF_COMPILER_PATCH_FILES
 }}
 
@@ -1004,13 +1001,19 @@ verifyCompilerPatch() {{
 
   echo "Final DKMS config:"
   cat "$source_dir/dkms.conf"
-  echo "Final DKMS Makefile compiler lines:"
-  grep -n "CC=\\|CC ?=\\|\\$(MAKE).*CC=" "$source_dir/Makefile" || true
+  echo "Final DKMS driver Makefile compiler lines:"
+  grep -RIn "CC[[:space:]]*[?]*=" "$source_dir" /opt/maccel 2>/dev/null || true
 
-  hardcoded_matches="$(grep -RIn "CC=gcc" "$source_dir" 2>/dev/null | grep -v "CC=$kernel_compiler" || true)"
+  hardcoded_matches="$(grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" "$source_dir" 2>/dev/null || true)"
   if [ -n "$hardcoded_matches" ]; then
     echo "Compiler patch verification failed: DKMS source still contains CC=gcc"
     echo "$hardcoded_matches"
+    return 1
+  fi
+  opt_hardcoded_matches="$(grep -RIn "^[[:space:]]*CC=gcc[[:space:]]*$" /opt/maccel 2>/dev/null || true)"
+  if [ -n "$opt_hardcoded_matches" ]; then
+    echo "Compiler patch verification failed: /opt/maccel still contains CC=gcc"
+    echo "$opt_hardcoded_matches"
     return 1
   fi
 
@@ -1018,16 +1021,16 @@ verifyCompilerPatch() {{
     echo "Compiler patch verification failed: DKMS config missing CC=$kernel_compiler"
     return 1
   fi
-  if grep -q "^[[:space:]]*CC=gcc$" "$source_dir/Makefile"; then
-    echo "Compiler patch verification failed: DKMS Makefile still assigns CC=gcc"
+  if ! grep -RIn "^[[:space:]]*CC ?= gcc[[:space:]]*$" "$source_dir" 2>/dev/null | grep -q "/driver/Makefile:"; then
+    echo "Compiler patch verification failed: DKMS driver/Makefile missing CC ?= gcc"
     return 1
   fi
-  if ! grep -q 'CC=$(CC)' "$source_dir/Makefile"; then
-    echo 'Compiler patch verification failed: DKMS Makefile missing CC=$(CC) nested build command'
+  if ! grep -RIn "^[[:space:]]*CC ?= gcc[[:space:]]*$" /opt/maccel 2>/dev/null | grep -q "/driver/Makefile:"; then
+    echo "Compiler patch verification failed: /opt/maccel driver/Makefile missing CC ?= gcc"
     return 1
   fi
 
-  echo "Patch compiler_path: verified no hardcoded CC=gcc remains"
+  echo "Patch compiler_path: verified no exact CC=gcc assignments remain"
 }}
 
 applyDkmsConfigPatchIfNeeded() {{
