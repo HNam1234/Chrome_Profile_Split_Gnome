@@ -727,10 +727,13 @@ class MouseMovementService:
         missing_commands = [command for command in self.required_commands if shutil.which(command) is None]
         kernel_release = run(["uname", "-r"], check=False) or "unknown"
         headers_path = Path("/lib/modules") / kernel_release / "build"
+        kernel_compiler = self._detect_kernel_compiler()
         return {
             "maccelInstalled": self.isMaccelInstalled(),
             "pkexecAvailable": shutil.which("pkexec") is not None,
             "missingCommands": missing_commands,
+            "kernelCompiler": kernel_compiler,
+            "kernelCompilerInstalled": shutil.which(kernel_compiler) is not None if kernel_compiler else True,
             "kernelHeadersInstalled": headers_path.exists(),
             "kernelRelease": kernel_release,
             "installLogPath": str(MOUSE_INSTALL_LOG),
@@ -801,6 +804,21 @@ class MouseMovementService:
         with MOUSE_COMMAND_LOG.open("a", encoding="utf-8") as handle:
             handle.write(f"{iso_now()} {' '.join(command)}\n")
 
+    def _detect_kernel_compiler(self):
+        version = ""
+        try:
+            version = Path("/proc/version").read_text(encoding="utf-8")
+        except Exception:
+            return ""
+        for part in version.replace(")", " ").replace("(", " ").split():
+            if "gcc-" not in part:
+                continue
+            suffix = part.rsplit("gcc-", 1)[-1]
+            digits = "".join(ch for ch in suffix if ch.isdigit())
+            if digits:
+                return f"gcc-{digits}"
+        return ""
+
     def _write_installer_script(self):
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -815,9 +833,19 @@ exec >>"$log_path" 2>&1
 echo "==== maccel install started $(date -Is) ===="
 export DEBIAN_FRONTEND=noninteractive
 
+kernel_compiler="$(grep -o 'gcc-[0-9]\\+' /proc/version | head -n 1 || true)"
+compiler_package=""
+if [ -n "$kernel_compiler" ]; then
+  compiler_package="$kernel_compiler"
+fi
+
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y curl git make dkms gcc sudo wget ca-certificates "linux-headers-$(uname -r)"
+  packages=(curl git make dkms gcc sudo wget ca-certificates "linux-headers-$(uname -r)")
+  if [ -n "$compiler_package" ]; then
+    packages+=("$compiler_package")
+  fi
+  apt-get install -y "${{packages[@]}}"
 else
   echo "apt-get was not found. Install maccel dependencies manually for this distro."
   exit 1
@@ -827,7 +855,18 @@ workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 git clone --depth 1 https://github.com/Gnarus-G/maccel.git "$workdir/maccel"
 cd "$workdir/maccel"
-bash ./install.sh
+
+dkms_version="$(grep "pkgver=" PKGBUILD | grep -oP '\\d\\.\\d\\.\\d')"
+dkms remove -m maccel -v "$dkms_version" --all || true
+
+if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
+  echo "Using kernel compiler: $kernel_compiler"
+  sed -i "s/^MAKE\\[0\\]=.*/MAKE[0]=\\"make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=@DRIVER_CFLAGS@\\"/" dkms.conf
+  sed -i "s/^\\tCC=gcc$/\\tCC ?= $kernel_compiler/" driver/Makefile
+  CC="$kernel_compiler" bash ./install.sh
+else
+  bash ./install.sh
+fi
 
 groupadd -f maccel
 if [ -n "${{PKEXEC_UID:-}}" ]; then
@@ -1244,6 +1283,10 @@ class App(Gtk.ApplicationWindow):
         else:
             install_lines.append(f"Kernel headers: will install for {install_status['kernelRelease']}")
 
+        if install_status["kernelCompiler"]:
+            compiler_state = "detected" if install_status["kernelCompilerInstalled"] else "will install"
+            install_lines.append(f"Kernel compiler: {compiler_state} {install_status['kernelCompiler']}")
+
         install_lines.append(f"Install log: {install_status['installLogPath']}")
         self.mouse_install_label.set_text("\n".join(install_lines))
 
@@ -1482,7 +1525,12 @@ class App(Gtk.ApplicationWindow):
         elif exit_code == 0:
             self.log(f"maccel installer finished, but maccel was not detected. Check {MOUSE_INSTALL_LOG}.")
         else:
-            self.log(f"maccel install failed. Check {MOUSE_INSTALL_LOG}.")
+            detail = self.latest_mouse_install_log_line()
+            message = "maccel install failed."
+            if detail:
+                message += f" Last log: {detail}"
+            message += f" Check {MOUSE_INSTALL_LOG}."
+            self.log(message)
         self.refresh_mouse_movement_state()
 
     def on_mouse_macos(self, _button):
