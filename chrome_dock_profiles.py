@@ -828,6 +828,7 @@ set -euo pipefail
 
 log_path="{MOUSE_INSTALL_LOG}"
 mkdir -p "$(dirname "$log_path")"
+: >"$log_path"
 exec >>"$log_path" 2>&1
 
 echo "==== maccel install started $(date -Is) ===="
@@ -853,20 +854,49 @@ fi
 
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
-git clone --depth 1 https://github.com/Gnarus-G/maccel.git "$workdir/maccel"
-cd "$workdir/maccel"
+rm -rf /opt/maccel
+git clone --depth 1 https://github.com/Gnarus-G/maccel.git /opt/maccel
+cd /opt/maccel
+
+echo "Installing udev rules..."
+make udev_uninstall || true
+make udev_install
 
 dkms_version="$(grep "pkgver=" PKGBUILD | grep -oP '\\d\\.\\d\\.\\d')"
+echo "Preparing DKMS module maccel/$dkms_version..."
 dkms remove -m maccel -v "$dkms_version" --all || true
+rm -rf "/usr/src/maccel-$dkms_version"
+install -Dm 644 dkms.conf "/usr/src/maccel-$dkms_version/dkms.conf"
+sed -e "s/@_PKGNAME@/maccel/" \
+    -e "s/@PKGVER@/$dkms_version/" \
+    -e "s/@DRIVER_CFLAGS@/''/" \
+    -i "/usr/src/maccel-$dkms_version/dkms.conf"
+cp -r driver/. "/usr/src/maccel-$dkms_version/"
 
 if [ -n "$kernel_compiler" ] && command -v "$kernel_compiler" >/dev/null 2>&1; then
   echo "Using kernel compiler: $kernel_compiler"
-  sed -i "s/^MAKE\\[0\\]=.*/MAKE[0]=\\"make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=@DRIVER_CFLAGS@\\"/" dkms.conf
-  sed -i "s/^\\tCC=gcc$/\\tCC ?= $kernel_compiler/" driver/Makefile
-  CC="$kernel_compiler" bash ./install.sh
-else
-  bash ./install.sh
+  sed -i "s|^MAKE\\[0\\]=.*|MAKE[0]=\\"make CC=$kernel_compiler KVER=\\$kernelver DRIVER_CFLAGS=''\\\"|" "/usr/src/maccel-$dkms_version/dkms.conf"
+  sed -i "s/^[[:space:]]*CC=gcc$/	CC ?= $kernel_compiler/" "/usr/src/maccel-$dkms_version/Makefile"
+  export CC="$kernel_compiler"
 fi
+
+echo "Building and installing DKMS module..."
+dkms install --force "maccel/$dkms_version"
+modprobe maccel
+
+echo "Installing maccel CLI..."
+mkdir -p /opt/maccel/bin
+if curl -fsSL "https://github.com/Gnarus-G/maccel/releases/download/v$dkms_version/maccel-cli.tar.gz" -o "$workdir/maccel-cli.tar.gz"; then
+  tar -zxvf "$workdir/maccel-cli.tar.gz" -C "$workdir"
+  install -m 755 -D "$workdir/maccel_v$dkms_version/maccel" /opt/maccel/bin/maccel
+elif command -v cargo >/dev/null 2>&1; then
+  cargo build --bin maccel --release
+  install -m 755 -D target/release/maccel /opt/maccel/bin/maccel
+else
+  echo "Could not install maccel CLI from release and cargo is not installed."
+  exit 1
+fi
+ln -sf /opt/maccel/bin/maccel /usr/local/bin/maccel
 
 groupadd -f maccel
 if [ -n "${{PKEXEC_UID:-}}" ]; then
@@ -1024,6 +1054,21 @@ class App(Gtk.ApplicationWindow):
         self.mouse_install_label.set_xalign(0)
         self.mouse_install_label.set_line_wrap(True)
         mouse_card.pack_start(self.mouse_install_label, False, False, 0)
+
+        log_label = Gtk.Label()
+        log_label.set_markup("<b>Install Log</b>")
+        log_label.set_xalign(0)
+        mouse_card.pack_start(log_label, False, False, 0)
+
+        self.mouse_install_log_view = Gtk.TextView()
+        self.mouse_install_log_view.set_editable(False)
+        self.mouse_install_log_view.set_cursor_visible(False)
+        self.mouse_install_log_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.mouse_install_log_view.set_monospace(True)
+        mouse_log_scroller = Gtk.ScrolledWindow()
+        mouse_log_scroller.set_min_content_height(180)
+        mouse_log_scroller.add(self.mouse_install_log_view)
+        mouse_card.pack_start(mouse_log_scroller, True, True, 0)
 
         mouse_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         mouse_card.pack_start(mouse_grid, False, False, 0)
@@ -1289,6 +1334,7 @@ class App(Gtk.ApplicationWindow):
 
         install_lines.append(f"Install log: {install_status['installLogPath']}")
         self.mouse_install_label.set_text("\n".join(install_lines))
+        self.refresh_mouse_install_log_view()
 
         active = self.mouse_service.getCurrentPresetState()
         active_label = {
@@ -1304,6 +1350,24 @@ class App(Gtk.ApplicationWindow):
             self.mouse_warning_label.set_text("Mouse Movement is only supported on Linux.")
         else:
             self.mouse_warning_label.set_text("")
+
+    def refresh_mouse_install_log_view(self):
+        if not hasattr(self, "mouse_install_log_view"):
+            return
+        text = ""
+        if MOUSE_INSTALL_LOG.exists():
+            try:
+                lines = MOUSE_INSTALL_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+                text = "\n".join(lines[-220:])
+            except Exception as error:
+                text = f"Could not read install log: {error}"
+        buffer = self.mouse_install_log_view.get_buffer()
+        current = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        if current == text:
+            return
+        buffer.set_text(text)
+        mark = buffer.create_mark(None, buffer.get_end_iter(), False)
+        self.mouse_install_log_view.scroll_mark_onscreen(mark)
 
     def latest_mouse_install_log_line(self):
         if not MOUSE_INSTALL_LOG.exists():
