@@ -1367,8 +1367,8 @@ echo "$(date -Is) mouse preset reapplied: $preset" >>"$log_path"
         MOUSE_AUTOSTART.write_text(
             f"""[Desktop Entry]
 Type=Application
-Name=Chrome Dock Profiles Mouse Movement
-Comment=Reapply the saved Chrome Dock Profiles mouse preset
+Name=Linux Toolbox Mouse Movement
+Comment=Reapply the saved Linux Toolbox mouse preset
 Exec={MOUSE_APPLY_ON_LOGIN}
 Terminal=false
 X-GNOME-Autostart-enabled=true
@@ -1875,7 +1875,7 @@ class App(Gtk.ApplicationWindow):
     def __init__(self, application):
         super().__init__(application=application)
         self.load_css()
-        self.set_title("Chrome Dock Profiles")
+        self.set_title("Linux Toolbox")
         self.set_default_size(1040, 720)
         self.set_border_width(0)
         self.profiles = []
@@ -1894,8 +1894,8 @@ class App(Gtk.ApplicationWindow):
 
         header = Gtk.HeaderBar()
         header.set_show_close_button(True)
-        header.props.title = "Chrome Dock Profiles"
-        header.props.subtitle = "Separate dock icons for each Chrome profile"
+        header.props.title = "Linux Toolbox"
+        header.props.subtitle = "Set-and-forget tools for Ubuntu"
         self.set_titlebar(header)
 
         refresh_header_button = Gtk.Button(label="Refresh")
@@ -2825,7 +2825,7 @@ class App(Gtk.ApplicationWindow):
     # --- maccel permission preflight + apply orchestration ------------------
 
     FRIENDLY_PERMISSION_ERROR = (
-        "Chrome Dock Profiles cannot write to maccel driver parameters yet. "
+        "Linux Toolbox cannot write to maccel driver parameters yet. "
         "Fix permission or log out and back in."
     )
 
@@ -2896,7 +2896,7 @@ class App(Gtk.ApplicationWindow):
             text="Permission required for maccel",
         )
         dialog.format_secondary_text(
-            "Chrome Dock Profiles needs permission to write maccel driver parameters.\n"
+            "Linux Toolbox needs permission to write maccel driver parameters.\n"
             "This is required to apply custom mouse sensitivity."
         )
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)

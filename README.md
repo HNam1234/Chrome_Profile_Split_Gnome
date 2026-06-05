@@ -16,7 +16,7 @@ cd Chrome_Profile_Split_Gnome
 ./install.sh
 ```
 
-Then open **Chrome Dock Profiles** from Applications.
+Then open **Linux Toolbox** from Applications.
 
 The app gives you a guided tabbed GUI with:
 
@@ -67,7 +67,7 @@ cd Chrome_Profile_Split_Gnome/clipboard-history
 - Type to search copied text.
 - Select an item in CopyQ to reuse it.
 
-CopyQ starts automatically on login. The main **Chrome Dock Profiles** GUI also has a Clipboard History switch that turns CopyQ autostart and the `Super+V` shortcut on or off.
+CopyQ starts automatically on login. The main **Linux Toolbox** GUI also has a Clipboard History switch that turns CopyQ autostart and the `Super+V` shortcut on or off.
 
 If CopyQ is not installed yet, the GUI/installer asks Ubuntu to install the `copyq` package.
 
@@ -81,7 +81,7 @@ The GUI shows a simple `[V]` or `[X]` backend indicator and an install button. I
 
 While installation runs, the Mouse Movement tab shows an active progress bar and the latest install log line.
 
-If `maccel` is available in `PATH`, open **Chrome Dock Profiles** and use:
+If `maccel` is available in `PATH`, open **Linux Toolbox** and use:
 
 - **Windows** for a Windows Enhanced Pointer Precision-like approximation.
 - **macOS** for a smooth macOS-like approximation.

@@ -24,15 +24,15 @@ chmod +x "$bin_dir/chrome-dock-profiles"
 cat > "$desktop_file" <<EOF
 [Desktop Entry]
 Version=1.0
-Name=Chrome Dock Profiles
-Comment=Install separate Ubuntu Dock icons for Chrome profiles
+Name=Linux Toolbox
+Comment=Set-and-forget Ubuntu tools for Chrome profiles, dock, clipboard, and mouse movement
 Exec=$bin_dir/chrome-dock-profiles
 Terminal=false
 Type=Application
 Categories=Utility;
-Icon=google-chrome
+Icon=applications-utilities
 EOF
 
 update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
-echo "Installed. Open 'Chrome Dock Profiles' from Applications, or run:"
+echo "Installed. Open 'Linux Toolbox' from Applications, or run:"
 echo "$bin_dir/chrome-dock-profiles"
