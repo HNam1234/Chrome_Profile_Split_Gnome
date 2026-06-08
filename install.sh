@@ -35,7 +35,7 @@ cat > "$new_desktop_file" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=Linux Toolbox
-Comment=Set-and-forget Ubuntu tools for Chrome profiles, dock, clipboard, and mouse movement
+Comment=Set-and-forget Ubuntu tools for AI, Chrome profiles, dock, clipboard, and mouse movement
 Exec=$bin_dir/linux-toolbox
 Terminal=false
 Type=Application

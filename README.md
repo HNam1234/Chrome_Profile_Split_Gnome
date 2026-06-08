@@ -3,6 +3,7 @@
 Set-and-forget Ubuntu GNOME utilities for a more Windows-like desktop workflow. Linux Toolbox is built for one-time setup: choose the desktop behavior you want, then use your machine without thinking about those tweaks again.
 
 - Separate dock icons for each Chrome/Chromium profile.
+- Simple AI login and terminal command setup.
 - A Windows-style horizontal dock preset for Ubuntu Dock.
 - `Super+V` clipboard history popup powered by CopyQ.
 - Simple Windows/macOS-like mouse movement presets powered by maccel.
@@ -26,6 +27,7 @@ linux-toolbox
 The app gives you a guided tabbed GUI with:
 
 - A Main tab with system overview and activity.
+- An AI Tools tab for saving a Bifrost key, opening OpenAI/Codex login, opening Claude web login, and installing terminal commands.
 - Detected Chrome/Chromium profile cards.
 - One-click install/update for profile dock icons.
 - One-click pinning to Ubuntu Dock.
@@ -40,6 +42,11 @@ The old `chrome-dock-profiles` command is still installed as a compatibility ali
 ## What It Does
 
 - Detects Chrome/Chromium profiles.
+- Stores a shared Bifrost URL/key in Linux Toolbox config.
+- Installs `biclaude` and `bicodex` into `~/.local/bin`.
+- Opens `codex login` for personal OpenAI/Codex auth.
+- Opens `claude auth login` for personal Claude web auth.
+- Leaves personal `codex` and `claude` separate from Bifrost wrappers.
 - Creates one `.desktop` launcher per profile.
 - Uses each profile picture as the dock icon when available.
 - Pins the profile launchers to Ubuntu Dock.

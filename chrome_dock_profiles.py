@@ -3,6 +3,7 @@ import ast
 import json
 import os
 import platform
+import shlex
 import shutil
 import stat
 import subprocess
@@ -38,6 +39,11 @@ COPYQ_START = BIN_DIR / "copyq-start"
 COPYQ_CLEAR = BIN_DIR / "copyq-clear"
 COPYQ_SERVICE = SYSTEMD_USER_DIR / "copyq.service"
 CLIPBOARD_SHORTCUT_BINDING = "<Super>v"
+AITOOLS_DESKTOP_ID = "aitools.desktop"
+AITOOLS_DESKTOP = APP_DIR / AITOOLS_DESKTOP_ID
+AITOOLS_WRAPPER = BIN_DIR / "linux-toolbox-aitools"
+BICLAUDE_COMMAND = BIN_DIR / "biclaude"
+BICODEX_COMMAND = BIN_DIR / "bicodex"
 # GNOME binds <Super>v to the notification tray by default, which steals the key
 # from CopyQ. We remove it from this binding (keeping the rest) so Super+V is
 # reliable, and restore it when the feature is turned off.
@@ -1075,6 +1081,365 @@ class VietnameseInputService:
         return "\n".join(lines[-limit:])
 
 
+class AIToolsService:
+    def commandEnv(self, config=None, mode="bifrost"):
+        if mode.startswith("personal_"):
+            return self.personalEnv(config)
+
+        env = dict(os.environ)
+        env.update(self.loadClaudeEnv())
+        config = config or {}
+        base_url = str(config.get("bifrostBaseUrl", "")).strip()
+        token = str(config.get("bifrostToken", "")).strip()
+        model = str(config.get("selectedModel", "")).strip()
+        if base_url:
+            env["AITOOLS_BASE_URL"] = base_url
+            env["ANTHROPIC_BASE_URL"] = base_url
+        if token:
+            env["AITOOLS_AUTH_TOKEN"] = token
+            env["ANTHROPIC_AUTH_TOKEN"] = token
+            env["ANTHROPIC_API_KEY"] = token
+        if model:
+            env["AITOOLS_MODEL"] = model
+            env["ANTHROPIC_MODEL"] = model
+        return env
+
+    def personalEnv(self, config=None):
+        env = dict(os.environ)
+        config = config or {}
+        saved_base = str(config.get("bifrostBaseUrl", "")).strip().rstrip("/")
+        saved_token = str(config.get("bifrostToken", "")).strip()
+        for key in ("AITOOLS_BASE_URL", "AITOOLS_AUTH_TOKEN", "AITOOLS_MODEL"):
+            env.pop(key, None)
+        current_base = env.get("ANTHROPIC_BASE_URL", "").strip().rstrip("/")
+        if current_base and (current_base == saved_base or "bifrost" in current_base.lower()):
+            env.pop("ANTHROPIC_BASE_URL", None)
+        for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            if saved_token and env.get(key) == saved_token:
+                env.pop(key, None)
+        return env
+
+    def executable_path(self):
+        path = shutil.which("aitools")
+        if path:
+            return Path(path)
+        fallback = BIN_DIR / "aitools"
+        return fallback if fallback.exists() else None
+
+    def isInstalled(self):
+        path = self.executable_path()
+        return bool(path and path.exists())
+
+    def desktopLauncherInstalled(self):
+        return AITOOLS_DESKTOP.exists()
+
+    def isPinned(self):
+        current = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "favorite-apps"], check=False))
+        return AITOOLS_DESKTOP_ID in current
+
+    def installDesktopLauncher(self):
+        path = self.executable_path()
+        if not path:
+            raise RuntimeError("aitools was not found in PATH.")
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        launcher_path = self.writeWrapper(path)
+        AITOOLS_DESKTOP.write_text(
+            load_template("desktop/aitools.desktop.tmpl", AITOOLS_PATH=launcher_path),
+            encoding="utf-8",
+        )
+        AITOOLS_DESKTOP.chmod(0o644)
+        run(["update-desktop-database", str(APP_DIR)], check=False)
+
+    def writeWrapper(self, aitools_path):
+        config = load_app_config().get("aiTools", {})
+        if not isinstance(config, dict):
+            config = {}
+        base_url = str(config.get("bifrostBaseUrl", "")).strip()
+        token = str(config.get("bifrostToken", "")).strip()
+        model = str(config.get("selectedModel", "")).strip()
+        if not base_url and not token and not model:
+            return aitools_path
+
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "#!/usr/bin/env bash",
+            "set -e",
+        ]
+        if base_url:
+            lines.append(f"export AITOOLS_BASE_URL={shlex.quote(base_url)}")
+        if token:
+            lines.append(f"export AITOOLS_AUTH_TOKEN={shlex.quote(token)}")
+        if model:
+            lines.append(f"export AITOOLS_MODEL={shlex.quote(model)}")
+        lines.append(f"exec {shlex.quote(str(aitools_path))} \"$@\"")
+        AITOOLS_WRAPPER.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        AITOOLS_WRAPPER.chmod(0o700)
+        return AITOOLS_WRAPPER
+
+    def installTerminalCommands(self, config=None):
+        config = config or {}
+        base_url = str(config.get("bifrostBaseUrl", "")).strip()
+        token = str(config.get("bifrostToken", "")).strip()
+        if not base_url:
+            raise RuntimeError("Bifrost URL is required.")
+        if not token:
+            raise RuntimeError("Bifrost key is required.")
+
+        claude_path = shutil.which("claude")
+        aitools_path = self.executable_path()
+        if not claude_path:
+            raise RuntimeError("claude CLI was not found in PATH.")
+        if not aitools_path:
+            raise RuntimeError("aitools was not found in PATH.")
+
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        env_lines = [
+            f"export ANTHROPIC_BASE_URL={shlex.quote(base_url)}",
+            f"export ANTHROPIC_AUTH_TOKEN={shlex.quote(token)}",
+            f"export ANTHROPIC_API_KEY={shlex.quote(token)}",
+            f"export AITOOLS_BASE_URL={shlex.quote(base_url)}",
+            f"export AITOOLS_AUTH_TOKEN={shlex.quote(token)}",
+        ]
+
+        biclaude = [
+            "#!/usr/bin/env bash",
+            "set -e",
+            *env_lines,
+            f"exec {shlex.quote(claude_path)} \"$@\"",
+        ]
+        BICLAUDE_COMMAND.write_text("\n".join(biclaude) + "\n", encoding="utf-8")
+        BICLAUDE_COMMAND.chmod(0o700)
+
+        bicodex = [
+            "#!/usr/bin/env bash",
+            "set -e",
+            *env_lines,
+            f"exec {shlex.quote(str(aitools_path))} \"$@\"",
+        ]
+        BICODEX_COMMAND.write_text("\n".join(bicodex) + "\n", encoding="utf-8")
+        BICODEX_COMMAND.chmod(0o700)
+
+    def terminalCommandsInstalled(self):
+        return BICLAUDE_COMMAND.exists() and BICODEX_COMMAND.exists()
+
+    def removeDesktopLauncher(self):
+        self.unpinFromDock()
+        AITOOLS_DESKTOP.unlink(missing_ok=True)
+        AITOOLS_WRAPPER.unlink(missing_ok=True)
+        run(["update-desktop-database", str(APP_DIR)], check=False)
+
+    def pinToDock(self):
+        self.installDesktopLauncher()
+        current = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "favorite-apps"], check=False))
+        filtered = [item for item in current if item != AITOOLS_DESKTOP_ID]
+        run(["gsettings", "set", "org.gnome.shell", "favorite-apps", format_gsettings_list([AITOOLS_DESKTOP_ID] + filtered)])
+
+    def unpinFromDock(self):
+        current = parse_gsettings_list(run(["gsettings", "get", "org.gnome.shell", "favorite-apps"], check=False))
+        filtered = [item for item in current if item != AITOOLS_DESKTOP_ID]
+        if filtered != current:
+            run(["gsettings", "set", "org.gnome.shell", "favorite-apps", format_gsettings_list(filtered)])
+
+    def terminalCommand(self, extra_args=None, raw=False):
+        if raw:
+            args = list(extra_args or [])
+        else:
+            path = self.executable_path()
+            if not path:
+                raise RuntimeError("aitools was not found in PATH.")
+            args = [str(path), *(extra_args or [])]
+        if not args:
+            raise RuntimeError("No command was provided.")
+        candidates = (
+            ("x-terminal-emulator", ["x-terminal-emulator", "-e", *args]),
+            ("gnome-terminal", ["gnome-terminal", "--", *args]),
+            ("kgx", ["kgx", "--", *args]),
+            ("konsole", ["konsole", "-e", *args]),
+            ("xfce4-terminal", ["xfce4-terminal", "-e", *args]),
+            ("xterm", ["xterm", "-e", *args]),
+        )
+        for binary, command in candidates:
+            if shutil.which(binary):
+                return command
+        raise RuntimeError("No terminal emulator was found.")
+
+    def launchInteractive(self, model=None, chat=False, config=None):
+        extra_args = []
+        if chat:
+            extra_args.append("--chat")
+        if model:
+            extra_args.extend(["-m", model])
+        subprocess.Popen(
+            self.terminalCommand(extra_args),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=self.commandEnv(config, "bifrost"),
+        )
+
+    def runPrompt(self, prompt, model=None, system_prompt=None, max_tokens=None, temperature=None, config=None):
+        path = self.executable_path()
+        if not path:
+            raise RuntimeError("aitools was not found in PATH.")
+        command = [str(path), "-p", prompt, "--no-stream"]
+        if model:
+            command.extend(["-m", model])
+        if system_prompt:
+            command.extend(["--system", system_prompt])
+        if max_tokens:
+            command.extend(["--max-tokens", str(max_tokens)])
+        if temperature is not None:
+            command.extend(["--temperature", str(temperature)])
+        completed = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=600,
+            env=self.commandEnv(config, "bifrost"),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "aitools command failed").strip())
+        return completed.stdout.strip()
+
+    def supportedModels(self, config=None):
+        path = self.executable_path()
+        if not path:
+            raise RuntimeError("aitools was not found in PATH.")
+        completed = subprocess.run(
+            [str(path), "--list"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            env=self.commandEnv(config, "bifrost"),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "aitools model list failed").strip())
+        return self.parseModels(completed.stdout)
+
+    def launchPersonal(self, tool, model=None):
+        binary = shutil.which(tool)
+        if not binary:
+            raise RuntimeError(f"{tool} CLI was not found in PATH.")
+        if tool == "claude":
+            args = [binary]
+            if model:
+                args.extend(["--model", model])
+        elif tool == "codex":
+            args = [binary]
+            if model:
+                args.extend(["--model", model])
+        else:
+            raise RuntimeError(f"Unsupported personal AI tool: {tool}")
+        subprocess.Popen(
+            self.terminalCommand(args, raw=True),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=self.personalEnv(load_app_config().get("aiTools", {})),
+        )
+
+    def launchLogin(self, tool):
+        if tool == "codex":
+            binary = shutil.which("codex")
+            args = [binary, "login"] if binary else []
+        elif tool == "claude":
+            binary = shutil.which("claude")
+            args = [binary, "auth", "login"] if binary else []
+        else:
+            raise RuntimeError(f"Unsupported login tool: {tool}")
+        if not args:
+            raise RuntimeError(f"{tool} CLI was not found in PATH.")
+        subprocess.Popen(
+            self.terminalCommand(args, raw=True),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=self.personalEnv(load_app_config().get("aiTools", {})),
+        )
+
+    def runPersonalPrompt(self, tool, prompt, model=None, system_prompt=None):
+        binary = shutil.which(tool)
+        if not binary:
+            raise RuntimeError(f"{tool} CLI was not found in PATH.")
+        if tool == "claude":
+            command = [binary, "-p"]
+            if model:
+                command.extend(["--model", model])
+            if system_prompt:
+                command.extend(["--system-prompt", system_prompt])
+            command.append(prompt)
+        elif tool == "codex":
+            command = [binary, "exec"]
+            if model:
+                command.extend(["--model", model])
+            if system_prompt:
+                prompt = f"System instructions:\n{system_prompt}\n\nUser prompt:\n{prompt}"
+            command.append(prompt)
+        else:
+            raise RuntimeError(f"Unsupported personal AI tool: {tool}")
+
+        completed = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=600,
+            env=self.personalEnv(load_app_config().get("aiTools", {})),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or f"{tool} command failed").strip())
+        return completed.stdout.strip()
+
+    def parseModels(self, output):
+        models = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or line.lower().startswith(("supported models", "pick a model")):
+                continue
+            if ")" in line:
+                number, candidate = line.split(")", 1)
+                if number.strip().isdigit():
+                    line = candidate.strip()
+            if line.startswith("- "):
+                line = line[2:].strip()
+            if line and line not in models:
+                models.append(line)
+        return models
+
+    def loadClaudeEnv(self):
+        path = HOME / ".claude/settings.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        env = data.get("env", {})
+        if not isinstance(env, dict):
+            return {}
+        return {str(key): str(value) for key, value in env.items() if value is not None}
+
+    def configStatus(self, config=None):
+        config = config or {}
+        env = self.commandEnv(config, "bifrost")
+        saved_base = bool(str(config.get("bifrostBaseUrl", "")).strip())
+        saved_token = bool(str(config.get("bifrostToken", "")).strip())
+        return {
+            "mode": config.get("connectionMode", "bifrost"),
+            "baseUrl": bool(env.get("ANTHROPIC_BASE_URL") or env.get("AITOOLS_BASE_URL")),
+            "token": bool(
+                env.get("ANTHROPIC_AUTH_TOKEN")
+                or env.get("ANTHROPIC_API_KEY")
+                or env.get("AITOOLS_AUTH_TOKEN")
+            ),
+            "savedBaseUrl": saved_base,
+            "savedToken": saved_token,
+            "defaultModel": env.get("ANTHROPIC_MODEL") or env.get("AITOOLS_MODEL") or "",
+            "personalClaude": shutil.which("claude") is not None,
+            "personalCodex": shutil.which("codex") is not None,
+        }
+
+
 class App(Gtk.ApplicationWindow):
     def __init__(self, application):
         super().__init__(application=application)
@@ -1087,6 +1452,7 @@ class App(Gtk.ApplicationWindow):
         self.syncing_features = False
         self.syncing_dock_layout = False
         self.syncing_sidebar = False
+        self.aitools_service = AIToolsService()
         self.mouse_service = MouseMovementService()
         self.vietnamese_service = VietnameseInputService(lambda message: self.log(message))
         self.mouse_install_process = None
@@ -1129,6 +1495,7 @@ class App(Gtk.ApplicationWindow):
         root.pack_start(self.stack, True, True, 0)
 
         main_scroller, main_tab = self.create_tab_page()
+        aitools_scroller, aitools_tab = self.create_tab_page()
         chrome_scroller, chrome_tab = self.create_tab_page()
         mouse_scroller, mouse_tab = self.create_tab_page()
         clipboard_scroller, clipboard_tab = self.create_tab_page()
@@ -1136,6 +1503,7 @@ class App(Gtk.ApplicationWindow):
         dock_scroller, dock_tab = self.create_tab_page()
 
         self.stack.add_titled(main_scroller, "overview", "Overview")
+        self.stack.add_titled(aitools_scroller, "aitools", "AI Tools")
         self.stack.add_titled(chrome_scroller, "chrome", "Chrome Profiles")
         self.stack.add_titled(mouse_scroller, "mouse", "Mouse")
         self.stack.add_titled(clipboard_scroller, "clipboard", "Clipboard")
@@ -1144,6 +1512,7 @@ class App(Gtk.ApplicationWindow):
 
         for name, title, icon in (
             ("overview", "Overview", "view-dashboard-symbolic"),
+            ("aitools", "AI Tools", "applications-science-symbolic"),
             ("chrome", "Chrome Profiles", "web-browser-symbolic"),
             ("mouse", "Mouse", "input-mouse-symbolic"),
             ("clipboard", "Clipboard", "edit-paste-symbolic"),
@@ -1159,7 +1528,7 @@ class App(Gtk.ApplicationWindow):
         main_tab.pack_start(intro, False, False, 0)
 
         description = Gtk.Label(
-            label="System overview for profile dock icons, clipboard history, mouse movement, and dock behavior."
+            label="System overview for AI tools, profile dock icons, clipboard history, mouse movement, and dock behavior."
         )
         description.set_xalign(0)
         description.set_line_wrap(True)
@@ -1197,6 +1566,88 @@ class App(Gtk.ApplicationWindow):
         log_scroller.set_min_content_height(180)
         log_scroller.add(self.log_view)
         status_card.pack_start(log_scroller, True, True, 8)
+
+        aitools_intro = Gtk.Label()
+        aitools_intro.set_markup("<span size='large'><b>AI Tools</b></span>")
+        aitools_intro.set_xalign(0)
+        aitools_intro.set_line_wrap(True)
+        aitools_tab.pack_start(aitools_intro, False, False, 0)
+
+        aitools_description = Gtk.Label(
+            label="Save one Bifrost key, log in to personal OpenAI/Claude, then use codex, claude, bicodex, or biclaude from any terminal."
+        )
+        aitools_description.set_xalign(0)
+        aitools_description.set_line_wrap(True)
+        aitools_tab.pack_start(aitools_description, False, False, 0)
+
+        aitools_account_card = self.create_card("Setup", "Configure the four terminal commands.")
+        aitools_tab.pack_start(aitools_account_card, False, False, 0)
+
+        aitools_account_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        aitools_account_card.pack_start(aitools_account_grid, False, False, 0)
+
+        base_url_label = Gtk.Label(label="Bifrost URL")
+        base_url_label.set_xalign(0)
+        aitools_account_grid.attach(base_url_label, 0, 0, 1, 1)
+        self.aitools_bifrost_base_entry = Gtk.Entry()
+        self.aitools_bifrost_base_entry.set_placeholder_text("https://bifrost.example.com/anthropic")
+        self.aitools_bifrost_base_entry.set_hexpand(True)
+        aitools_account_grid.attach(self.aitools_bifrost_base_entry, 1, 0, 3, 1)
+
+        token_label = Gtk.Label(label="Bifrost key")
+        token_label.set_xalign(0)
+        aitools_account_grid.attach(token_label, 0, 1, 1, 1)
+        self.aitools_bifrost_token_entry = Gtk.Entry()
+        self.aitools_bifrost_token_entry.set_visibility(False)
+        self.aitools_bifrost_token_entry.set_placeholder_text("sk-bf-...")
+        self.aitools_bifrost_token_entry.set_hexpand(True)
+        aitools_account_grid.attach(self.aitools_bifrost_token_entry, 1, 1, 3, 1)
+
+        aitools_account_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        aitools_account_card.pack_start(aitools_account_actions, False, False, 0)
+
+        self.aitools_install_commands_button = self.create_primary_button(
+            "Save Bifrost + Install Commands",
+            "Create or update biclaude and bicodex in ~/.local/bin.",
+        )
+        self.aitools_install_commands_button.connect("clicked", self.on_aitools_install_commands)
+        aitools_account_actions.pack_start(self.aitools_install_commands_button, True, True, 0)
+
+        self.aitools_clear_bifrost_button = Gtk.Button(label="Clear Bifrost Key")
+        self.aitools_clear_bifrost_button.set_tooltip_text("Remove the saved Bifrost key from Linux Toolbox config.")
+        self.aitools_clear_bifrost_button.connect("clicked", self.on_aitools_clear_bifrost)
+        aitools_account_actions.pack_start(self.aitools_clear_bifrost_button, True, True, 0)
+
+        aitools_login_card = self.create_card("Personal Login", "Use your own OpenAI/Codex or Claude account.")
+        aitools_tab.pack_start(aitools_login_card, False, False, 0)
+
+        aitools_login_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        aitools_login_card.pack_start(aitools_login_actions, False, False, 0)
+
+        self.aitools_openai_login_button = self.create_primary_button(
+            "OpenAI Login",
+            "Run codex login in a terminal.",
+        )
+        self.aitools_openai_login_button.connect("clicked", self.on_aitools_openai_login)
+        aitools_login_actions.pack_start(self.aitools_openai_login_button, True, True, 0)
+
+        self.aitools_claude_login_button = self.create_primary_button(
+            "Claude Web Login",
+            "Run claude auth login in a terminal.",
+        )
+        self.aitools_claude_login_button.connect("clicked", self.on_aitools_claude_login)
+        aitools_login_actions.pack_start(self.aitools_claude_login_button, True, True, 0)
+
+        aitools_status_card = self.create_card("Terminal Commands", "Available after setup.")
+        aitools_tab.pack_start(aitools_status_card, False, False, 0)
+
+        self.aitools_status_pill = self.make_pill("Unknown", "warn")
+        aitools_status_card.pack_start(self.aitools_status_pill, False, False, 0)
+
+        self.aitools_status_label = Gtk.Label()
+        self.aitools_status_label.set_xalign(0)
+        self.aitools_status_label.set_line_wrap(True)
+        aitools_status_card.pack_start(self.aitools_status_label, False, False, 0)
 
         chrome_intro = Gtk.Label()
         chrome_intro.set_markup("<span size='large'><b>Chrome Profiles</b></span>")
@@ -1569,9 +2020,11 @@ class App(Gtk.ApplicationWindow):
         vietnamese_log_scroller.add(self.vietnamese_log_view)
         vietnamese_log_card.pack_start(vietnamese_log_scroller, True, True, 0)
 
+        self.load_aitools_account_fields()
         self.refresh_compatibility()
         self.refresh_current_style()
         self.refresh_dock_layout_state()
+        self.refresh_aitools_state()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
@@ -1754,11 +2207,15 @@ class App(Gtk.ApplicationWindow):
         xdotool_available = shutil.which("xdotool") is not None
         config_dir, browser_id = detect_chrome_config()
         copyq_available = shutil.which("copyq") is not None
+        aitools_available = self.aitools_service.isInstalled()
+        aitools_status = self.aitools_service.configStatus(self.aitools_config())
 
         lines = [
             f"Desktop session: {session}",
             f"Shell: {shell}",
             f"Browser config: {config_dir if config_dir.exists() else 'not found yet'}",
+            f"AI Tools: {'installed' if aitools_available else 'not installed'}",
+            f"Bifrost key: {'saved' if aitools_status['savedToken'] else ('detected' if aitools_status['token'] else 'not configured')}",
             f"CopyQ: {'installed' if copyq_available else 'not installed'}",
         ]
 
@@ -1845,6 +2302,14 @@ class App(Gtk.ApplicationWindow):
         except Exception:
             vietnamese_status = "Unknown"
         try:
+            aitools_ready = self.aitools_service.isInstalled()
+            aitools_status = self.aitools_service.configStatus(self.aitools_config())
+            ai_commands = self.aitools_service.terminalCommandsInstalled()
+        except Exception:
+            aitools_ready = False
+            aitools_status = {"token": False}
+            ai_commands = False
+        try:
             style_action = run(["gsettings", "get", DASH_TO_DOCK_SCHEMA, "click-action"], check=False).strip("'")
         except Exception:
             style_action = "unknown"
@@ -1854,6 +2319,10 @@ class App(Gtk.ApplicationWindow):
             dock_layout = "Unavailable"
 
         pills = [
+            (
+                "AI Tools: Commands" if ai_commands else ("AI Tools: Key saved" if aitools_status.get("token") else "AI Tools: Setup"),
+                "ok" if ai_commands else ("warn" if aitools_ready or aitools_status.get("token") else "err"),
+            ),
             ("Chrome Profiles: On" if chrome_ready else "Chrome Profiles: Setup", "ok" if chrome_ready else "warn"),
             ("Hover Previews: On" if hover_ready else "Hover Previews: Off", "ok" if hover_ready else "warn"),
             (
@@ -1874,6 +2343,68 @@ class App(Gtk.ApplicationWindow):
         for text, level in pills:
             self.overview_summary_box.add(self.make_pill(text, level))
         self.overview_summary_box.show_all()
+
+    def refresh_aitools_state(self):
+        if not hasattr(self, "aitools_status_label"):
+            return
+        installed = self.aitools_service.isInstalled()
+        executable = self.aitools_service.executable_path()
+        settings = self.aitools_config()
+        config = self.aitools_service.configStatus(settings)
+        commands_installed = self.aitools_service.terminalCommandsInstalled()
+        bifrost_ready = config["baseUrl"] and config["token"]
+        all_ready = bifrost_ready and commands_installed and config["personalClaude"] and config["personalCodex"]
+
+        self.set_pill(self.aitools_status_pill, "Ready" if all_ready else "Setup", "ok" if all_ready else "warn")
+        lines = [
+            f"codex: {'available' if config['personalCodex'] else 'not found'}",
+            f"claude: {'available' if config['personalClaude'] else 'not found'}",
+            f"bicodex: {'installed' if BICODEX_COMMAND.exists() else 'not installed'}",
+            f"biclaude: {'installed' if BICLAUDE_COMMAND.exists() else 'not installed'}",
+            f"aitools: {executable or 'not found'}",
+            f"Bifrost base URL: {'saved' if config['savedBaseUrl'] else ('detected' if config['baseUrl'] else 'not configured')}",
+            f"Bifrost key: {'saved' if config['savedToken'] else ('detected' if config['token'] else 'not configured')}",
+            f"Terminal path: {BIN_DIR}",
+        ]
+        self.aitools_status_label.set_text("\n".join(lines))
+        self.refresh_overview_summary()
+
+    def aitools_config(self):
+        config = load_app_config().get("aiTools", {})
+        return config if isinstance(config, dict) else {}
+
+    def save_aitools_config(self, values):
+        config = load_app_config()
+        current = config.get("aiTools", {})
+        if not isinstance(current, dict):
+            current = {}
+        current.update(values)
+        config["aiTools"] = current
+        save_app_config(config)
+
+    def selected_aitools_mode(self):
+        return "bifrost"
+
+    def load_aitools_account_fields(self):
+        if not hasattr(self, "aitools_bifrost_base_entry"):
+            return
+        config = self.aitools_config()
+        self.aitools_bifrost_base_entry.set_text(str(config.get("bifrostBaseUrl", "")))
+        self.aitools_bifrost_token_entry.set_text(str(config.get("bifrostToken", "")))
+
+    def collect_aitools_account_fields(self):
+        return {
+            "connectionMode": "bifrost",
+            "bifrostBaseUrl": self.aitools_bifrost_base_entry.get_text().strip(),
+            "bifrostToken": self.aitools_bifrost_token_entry.get_text().strip(),
+        }
+
+    def save_aitools_account_fields(self):
+        values = self.collect_aitools_account_fields()
+        self.save_aitools_config(values)
+        if self.aitools_service.desktopLauncherInstalled() and self.aitools_service.isInstalled():
+            self.aitools_service.installDesktopLauncher()
+        return values
 
     def refresh_vietnamese_input_state(self):
         if not hasattr(self, "vietnamese_status_label"):
@@ -2315,11 +2846,53 @@ class App(Gtk.ApplicationWindow):
         self.refresh_compatibility()
         self.refresh_current_style()
         self.refresh_dock_layout_state()
+        self.refresh_aitools_state()
         self.refresh_profiles()
         self.refresh_feature_state()
         self.refresh_mouse_movement_state()
         self.refresh_vietnamese_input_state()
         self.refresh_overview_summary()
+
+    def text_view_text(self, view):
+        buffer = view.get_buffer()
+        return buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True).strip()
+
+    def set_text_view_text(self, view, text):
+        buffer = view.get_buffer()
+        buffer.set_text(text)
+        mark = buffer.create_mark(None, buffer.get_end_iter(), False)
+        view.scroll_mark_onscreen(mark)
+
+    def on_aitools_install_commands(self, _button):
+        try:
+            values = self.save_aitools_account_fields()
+            self.aitools_service.installTerminalCommands(values)
+            self.log("Installed terminal commands: biclaude and bicodex.")
+        except Exception as error:
+            self.log(f"Failed to install AI terminal commands: {error}")
+        self.refresh_aitools_state()
+
+    def on_aitools_openai_login(self, _button):
+        try:
+            self.aitools_service.launchLogin("codex")
+            self.log("Opened OpenAI/Codex login in a terminal.")
+        except Exception as error:
+            self.log(f"Failed to open OpenAI/Codex login: {error}")
+        self.refresh_aitools_state()
+
+    def on_aitools_claude_login(self, _button):
+        try:
+            self.aitools_service.launchLogin("claude")
+            self.log("Opened Claude web login in a terminal.")
+        except Exception as error:
+            self.log(f"Failed to open Claude web login: {error}")
+        self.refresh_aitools_state()
+
+    def on_aitools_clear_bifrost(self, _button):
+        self.aitools_bifrost_token_entry.set_text("")
+        self.save_aitools_account_fields()
+        self.log("Saved Bifrost key cleared.")
+        self.refresh_aitools_state()
 
     def on_vietnamese_check(self, _button):
         self.log("Checking OS...")
