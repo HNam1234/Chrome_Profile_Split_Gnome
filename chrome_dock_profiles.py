@@ -1509,6 +1509,13 @@ class AIToolsService:
             raise RuntimeError(f"Partial install: {', '.join(installed)}. {'; '.join(errors)}")
         return installed
 
+    def installTargetCliCommand(self, target, config=None):
+        if target == "codexCli":
+            return self.installCodexCliCommand(config)
+        if target == "claudeCli":
+            return self.installClaudeCliCommand(config)
+        raise RuntimeError(f"{target} does not use a terminal wrapper.")
+
     def installClaudeCliCommand(self, config=None):
         config = config or {}
         target = self.targetConfig(config, "claudeCli")
@@ -3575,7 +3582,7 @@ class App(Gtk.ApplicationWindow):
                 return item
         raise RuntimeError(f"Unknown AI Tools target: {target}")
 
-    def save_aitools_target_config(self, target, values):
+    def save_aitools_target_config(self, target, values, apply_realtime=True):
         config = load_app_config()
         current = config.get("aiTools", {})
         if not isinstance(current, dict):
@@ -3588,7 +3595,8 @@ class App(Gtk.ApplicationWindow):
             current["selectedModel"] = values.get("selectedModel", "")
         config["aiTools"] = current
         save_app_config(config)
-        self.aitools_service.applyRealtimeConfig(current)
+        if apply_realtime:
+            self.aitools_service.applyRealtimeConfig(current)
         return current
 
     def create_dialog_entry(self, grid, row, label_text, text="", placeholder="", secret=False):
@@ -3717,10 +3725,19 @@ class App(Gtk.ApplicationWindow):
                 "accountLabel": account_entry.get_text().strip(),
             }
             try:
-                self.save_aitools_target_config(target, new_values)
-                self.log(f"Saved {title} config.")
+                current = self.save_aitools_target_config(target, new_values, apply_realtime=False)
             except Exception as error:
                 self.log(f"Failed to save {title} config: {error}")
+            else:
+                try:
+                    if target in {"codexCli", "claudeCli"}:
+                        command = self.aitools_service.installTargetCliCommand(target, current)
+                        self.log(f"Saved {title} config and installed {command}.")
+                    else:
+                        self.aitools_service.applyRealtimeConfig(current)
+                        self.log(f"Saved and applied {title} config.")
+                except Exception as error:
+                    self.log(f"Saved {title} config, but failed to apply it: {error}")
         dialog.destroy()
         self.refresh_aitools_state()
 
